@@ -10,8 +10,9 @@ const button = (label,action,id='',classes='') => `<button class="btn ${classes}
 const brand = `<a class="brand" href="#overview" aria-label="Co4 home"><span class="brandmark" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span>Co<sup>4</sup></span></a>`;
 let S = {boot:null,data:null,view:'overview',query:'',filter:'all',detail:null,tab:'summary',pending:false};
 let toastTimeout;
-async function api(path,method='GET',body){
-  const response = await fetch(path,{method,credentials:'same-origin',headers:{'Content-Type':'application/json','X-Co4-CSRF':'1'},body:body===undefined?undefined:JSON.stringify(body)});
+let deviceFlowAbort = null;
+async function api(path,method='GET',body,signal){
+  const response = await fetch(path,{method,credentials:'same-origin',headers:{'Content-Type':'application/json','X-Co4-CSRF':'1'},body:body===undefined?undefined:JSON.stringify(body),signal});
   let data;try{data=await response.json();}catch{throw new Error(`Server returned ${response.status}`);}
   if(!response.ok){
     if(response.status===401 && path!='/auth/demo'){S.boot.user=null;render();}
@@ -86,8 +87,12 @@ function reviewTab(l){if(S.tab==='summary')return `<div class="prewrap">${esc(l.
 async function loadTrace(id){let after=0,items=[];while(true){const batch=await api(`/api/leases/${id}/events?after=${after}`);items.push(...batch);if(batch.length<200)break;after=batch.at(-1).sequence;}if($('#trace-content'))$('#trace-content').textContent=items.map(e=>`[${e.sequence} · ${e.kind}]\n${e.text}`).join('\n\n')||'No retained events.';}
 async function mutate(path,body={}){await api(path,'POST',body);await refresh();toast('Saved.');}
 async function startDeviceFlow(){
+  if(deviceFlowAbort) deviceFlowAbort.abort();
+  deviceFlowAbort = new AbortController();
+  const signal = deviceFlowAbort.signal;
   let init;
-  try { init = await api('/auth/github/device/code','POST',{}) } catch (e) { toast('Device flow unavailable: '+e.message); return }
+  try { init = await api('/auth/github/device/code','POST',{},signal) } catch (e) { if(signal.aborted) return; toast('Device flow unavailable: '+e.message); return }
+  if(signal.aborted) return;
   const expiresAt = new Date(init.expires_in*1000+Date.now()).toLocaleTimeString();
   const html = `
     <p>On any browser, open <a href="${esc(init.verification_uri)}" target="_blank" rel="noopener">${esc(init.verification_uri)}</a> and sign in to GitHub.</p>
@@ -101,18 +106,20 @@ async function startDeviceFlow(){
     </div>
   `;
   showDialog('Sign in with GitHub',html);
+  const dialog = $('#dialog');
+  dialog.addEventListener('close',()=>{ signal.abort(); },{ once: true });
   let interval = (init.interval||5)*1000;
   const deviceCode = init.device_code;
-  let cancelled = false;
   const copyBtn = document.querySelector('[data-action="device-copy-code"]');
   if(copyBtn) copyBtn.addEventListener('click',()=>{ navigator.clipboard?.writeText(init.user_code); toast('Copied'); });
   const cancelBtn = document.querySelector('[data-action="device-cancel"]');
-  if(cancelBtn) cancelBtn.addEventListener('click',()=>{ cancelled = true; $('#dialog').close(); });
+  if(cancelBtn) cancelBtn.addEventListener('click',()=>{ signal.abort(); $('#dialog').close(); });
   const tick = async () => {
-    if(cancelled) return;
+    if(signal.aborted) return;
     let r;
-    try { r = await api('/auth/github/device/poll','POST',{device_code:deviceCode}) }
-    catch (e) { const status = $('#device-poll-status'); if(status) status.textContent = 'Error: '+e.message; return }
+    try { r = await api('/auth/github/device/poll','POST',{device_code:deviceCode},signal) }
+    catch (e) { if(signal.aborted) return; const status = $('#device-poll-status'); if(status) status.textContent = 'Error: '+e.message; return }
+    if(signal.aborted) return;
     if(r.status === 'authorized'){
       document.cookie = 'co4_session='+encodeURIComponent(r.session_token)+'; path=/; max-age='+(7*86400)+'; samesite=lax';
       $('#dialog').close();

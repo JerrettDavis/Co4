@@ -249,7 +249,7 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
             fail(404, "Not found")
         data = gateway.request_device_code(DEVICE_SCOPES)
         interval = int(data.get("interval") or DEVICE_INTERVAL_DEFAULT)
-        expires_at = time.time() + min(int(data.get("expires_in") or DEVICE_EXPIRES_IN_DEFAULT), DEVICE_EXPIRES_IN_DEFAULT)
+        expires_at = time.time() + int(data.get("expires_in") or DEVICE_EXPIRES_IN_DEFAULT)
         with database.transaction() as s:
             s.add(DeviceFlow(
                 device_code=data["device_code"],
