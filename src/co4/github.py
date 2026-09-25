@@ -5,22 +5,32 @@ from pathlib import Path
 from urllib.parse import quote
 import httpx
 import jwt
-from co4.config import Settings
+from co4.config import Settings, is_loopback_url
 
 class GitHubError(RuntimeError):
     pass
+
+
+def _base_url(url: str, default: str) -> str:
+    url = (url or default).rstrip("/")
+    if not url.startswith("https://") and not (url.startswith("http://") and is_loopback_url(url)):
+        raise ValueError("GitHub base URL overrides must use HTTPS, or plain HTTP on a loopback host")
+    return url
+
 
 class GitHub:
     """Narrow GitHub App gateway. No contributor harness credentials leave the device."""
     def __init__(self, settings: Settings, client: httpx.Client | None = None):
         self.settings = settings
         self.client = client or httpx.Client(timeout=25, follow_redirects=False)
+        self.web = _base_url(getattr(settings, "github_url", ""), "https://github.com")
+        self.api = _base_url(getattr(settings, "github_api_url", ""), "https://api.github.com")
 
     def request(self, method: str, path: str, token: str, **kwargs):
         headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
                    "X-GitHub-Api-Version": "2022-11-28"}
         headers.update(kwargs.pop("headers", {}))
-        response = self.client.request(method, "https://api.github.com" + path, headers=headers, **kwargs)
+        response = self.client.request(method, self.api + path, headers=headers, **kwargs)
         if response.status_code >= 400:
             # Never echo tokens or raw API bodies into public audit/error data.
             raise GitHubError(f"GitHub {method} {path.split('?')[0]} returned {response.status_code}")
@@ -34,7 +44,7 @@ class GitHub:
         return self.request("POST", f"/app/installations/{installation}/access_tokens", signed, json=body).json()["token"]
 
     def exchange(self, code: str) -> str:
-        response = self.client.post("https://github.com/login/oauth/access_token", headers={"Accept": "application/json"},
+        response = self.client.post(self.web + "/login/oauth/access_token", headers={"Accept": "application/json"},
             json={"client_id": self.settings.client_id, "client_secret": self.settings.client_secret,
                   "code": code, "redirect_uri": self.settings.public_url + "/auth/github/callback"})
         response.raise_for_status()
@@ -56,7 +66,7 @@ class GitHub:
             data = dict(base)
             if with_secret:
                 data["client_secret"] = self.settings.client_secret
-            response = self.client.post("https://github.com/login/device/code",
+            response = self.client.post(self.web + "/login/device/code",
                 headers={"Accept": "application/json"}, data=data)
             if response.status_code >= 400:
                 raise GitHubError(f"GitHub device code returned {response.status_code}")
@@ -84,7 +94,7 @@ class GitHub:
             data = dict(base)
             if with_secret:
                 data["client_secret"] = self.settings.client_secret
-            response = self.client.post("https://github.com/login/oauth/access_token",
+            response = self.client.post(self.web + "/login/oauth/access_token",
                 headers={"Accept": "application/json"}, data=data)
             if response.status_code >= 400:
                 raise GitHubError(f"GitHub device poll returned {response.status_code}")

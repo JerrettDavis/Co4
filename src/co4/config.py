@@ -25,6 +25,10 @@ class Settings:
     webhook_secret: str = field(default_factory=lambda: os.getenv("GITHUB_WEBHOOK_SECRET", ""))
     client_id: str = field(default_factory=lambda: os.getenv("GITHUB_CLIENT_ID", ""))
     client_secret: str = field(default_factory=lambda: os.getenv("GITHUB_CLIENT_SECRET", ""))
+    # Test seams: point the GitHub gateway at a local stand-in (e.g. the browser e2e mock). Non-HTTPS
+    # overrides are only accepted for loopback hosts; see GitHub.__init__.
+    github_url: str = field(default_factory=lambda: os.getenv("CO4_GITHUB_URL", "https://github.com").rstrip("/"))
+    github_api_url: str = field(default_factory=lambda: os.getenv("CO4_GITHUB_API_URL", "https://api.github.com").rstrip("/"))
     background: bool = True
     secure_cookies: bool = True
     stale_seconds: int = 12 * 3600
