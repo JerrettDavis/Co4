@@ -107,7 +107,11 @@ class GitHub:
         if error == "authorization_pending":
             return {"status": "pending"}
         if error == "slow_down":
-            return {"status": "slow_down", "interval": payload.get("interval", 5)}
+            # Per the OAuth Device Flow spec, GitHub's slow_down response MAY include an
+            # explicit `interval` (an absolute value to use going forward). When it is
+            # omitted, the caller must increase whatever interval it is already using by
+            # at least 5s -- do not paper over that distinction by guessing a default here.
+            return {"status": "slow_down", "interval": payload.get("interval")}
         if error == "expired_token":
             return {"status": "expired"}
         if error == "access_denied":

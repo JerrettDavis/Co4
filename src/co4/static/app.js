@@ -134,7 +134,7 @@ async function startDeviceFlow(){
       }
       return;
     }
-    if(r.status === 'slow_down') interval = (r.interval||interval/1000+5)*1000;
+    if(r.status === 'slow_down') interval = r.interval!=null ? r.interval*1000 : interval+5000;
     if(r.status === 'expired'){ const status = $('#device-poll-status'); if(status) status.textContent = 'Code expired. Please restart sign-in.'; return }
     if(r.status === 'denied'){ const status = $('#device-poll-status'); if(status) status.textContent = 'Authorization denied on GitHub.'; return }
     const status = $('#device-poll-status');

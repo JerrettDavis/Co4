@@ -20,6 +20,9 @@ class DevicePollResponse(BaseModel):
     model_config = ConfigDict(extra="ignore")
     status: Literal["pending", "slow_down", "expired", "denied", "authorized"]
     user: Optional[dict] = None
+    # Present only when GitHub's slow_down response supplied an explicit interval;
+    # omitted (not defaulted) when the client must instead increment its own interval.
+    interval: Optional[int] = None
 
 class Policy(Strict):
     access: Literal["open", "verified", "maintainers"] = "verified"

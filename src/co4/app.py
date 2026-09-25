@@ -1,5 +1,6 @@
 from __future__ import annotations
 import asyncio
+from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 import hashlib
 import hmac
@@ -58,6 +59,34 @@ class BodyLimit:
         await self.app(scope, replay, send)
 
 
+class SlidingWindowLimiter:
+    """Minimal in-process, per-key sliding-window rate limiter.
+
+    Single-process, in-memory only -- no Redis or other shared store, which is fine for
+    a small app like this one and adds no new dependency. It exists to keep an
+    unauthenticated caller from hammering an endpoint that fans out to a scarce shared
+    quota (e.g. GitHub's 50/hour device-code limit per client_id) or that writes a
+    permanent row per call.
+    """
+    def __init__(self, limit: int, window_seconds: float):
+        self.limit = limit
+        self.window_seconds = window_seconds
+        self._hits: dict[str, deque] = defaultdict(deque)
+
+    def hit(self, key: str, now: float | None = None) -> bool:
+        """Record an attempt for `key`. Returns True if it is allowed, False if `key`
+        has already reached the limit within the current window."""
+        now = time.time() if now is None else now
+        bucket = self._hits[key]
+        cutoff = now - self.window_seconds
+        while bucket and bucket[0] <= cutoff:
+            bucket.popleft()
+        if len(bucket) >= self.limit:
+            return False
+        bucket.append(now)
+        return True
+
+
 def _origins_match(origin: str, public_url: str) -> bool:
     """Return True when `origin` should be accepted alongside `public_url`.
 
@@ -96,6 +125,12 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
     DEVICE_INTERVAL_DEFAULT = 5
     DEVICE_EXPIRES_IN_DEFAULT = 600  # 10 minutes
     DEVICE_FLOW_POST_PATHS = {"/auth/github/device/code", "/auth/github/device/poll"}
+    # GitHub allows 50 device-code requests/hour per client_id, shared across every caller.
+    # Stay well under that per source address so one noisy or abusive client cannot exhaust
+    # the shared budget (or spam a permanent DeviceFlow row per call) for everyone else.
+    DEVICE_CODE_RATE_LIMIT = 15
+    DEVICE_CODE_RATE_WINDOW = 3600.0
+    device_code_limiter = SlidingWindowLimiter(DEVICE_CODE_RATE_LIMIT, DEVICE_CODE_RATE_WINDOW)
 
     @asynccontextmanager
     async def lifespan(app):
@@ -246,10 +281,13 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
         return response
 
     @app.post("/auth/github/device/code")
-    def device_flow_init():
+    def device_flow_init(request: Request):
         """Initiate device flow. Returns DeviceCodeResponse."""
         if cfg.demo:
             fail(404, "Not found")
+        client_host = request.client.host if request.client else "unknown"
+        if not device_code_limiter.hit(f"device-code:{client_host}"):
+            fail(429, "Too many device sign-in attempts from this address. Try again later.")
         data = gateway.request_device_code(DEVICE_SCOPES)
         interval = int(data.get("interval") or DEVICE_INTERVAL_DEFAULT)
         expires_at = time.time() + int(data.get("expires_in") or DEVICE_EXPIRES_IN_DEFAULT)
@@ -303,7 +341,14 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
                 user_dict = {"id": u.id, "login": u.login, "github_id": u.github_id}
             return session_cookie(JSONResponse({"status": "authorized", "user": user_dict}), raw)
         if status == "slow_down":
-            return JSONResponse({"status": "slow_down", "interval": int(outcome.get("interval", DEVICE_INTERVAL_DEFAULT))})
+            # Only surface an `interval` when GitHub actually gave us an explicit one.
+            # Omitting it lets the frontend tell "GitHub said use exactly N seconds" apart
+            # from "GitHub said nothing; add 5s to whatever interval you're already using."
+            explicit_interval = outcome.get("interval")
+            body = {"status": "slow_down"}
+            if explicit_interval is not None:
+                body["interval"] = int(explicit_interval)
+            return JSONResponse(body)
         if status == "pending":
             return JSONResponse({"status": "pending"})
         if status == "expired":

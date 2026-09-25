@@ -2,7 +2,7 @@
 import httpx
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import func, select
 from co4.github import GitHub, GitHubError
 from co4.models import DeviceFlow, Session
 
@@ -101,6 +101,30 @@ def test_device_flow_poll_slow_down_returns_interval(app, monkeypatch):
         assert body['interval'] == 10
 
 
+def test_device_flow_poll_slow_down_without_explicit_interval_omits_field(app, monkeypatch):
+    """When the gateway reports no explicit GitHub interval (interval: None), the API
+    response must omit `interval` entirely rather than falling back to a default -- the
+    frontend needs to be able to tell the two cases apart to increment its own interval
+    instead of resetting to the default each time."""
+    app.state.settings.demo = False
+    monkeypatch.setattr(app.state.github, 'request_device_code',
+                        lambda scope: {'device_code':'dev-3b', 'user_code':'OMIT-OMIT',
+                                       'verification_uri':'https://github.com/login/device',
+                                       'expires_in':600, 'interval':1},
+                        raising=False)
+    monkeypatch.setattr(app.state.github, 'poll_device_token',
+                        lambda dc: {'status':'slow_down', 'interval':None},
+                        raising=False)
+    with TestClient(app) as c:
+        c.post('/auth/github/device/code', headers={'X-Co4-CSRF':'1'})
+        r = c.post('/auth/github/device/poll', headers={'X-Co4-CSRF':'1'},
+                   json={'device_code':'dev-3b'})
+        assert r.status_code == 200
+        body = r.json()
+        assert body['status'] == 'slow_down'
+        assert 'interval' not in body
+
+
 def test_device_flow_poll_unknown_device_code_returns_404(app):
     app.state.settings.demo = False
     with TestClient(app) as c:
@@ -113,6 +137,49 @@ def test_device_flow_disabled_in_demo_mode(app):
     with TestClient(app) as c:
         r = c.post('/auth/github/device/code', headers={'X-Co4-CSRF':'1'})
         assert r.status_code == 404
+
+
+def _mock_device_code_counter(app, monkeypatch):
+    """Each call returns a fresh device_code/user_code pair and bumps `counter[0]`, so
+    tests can tell how many times GitHub was actually contacted."""
+    counter = [0]
+    def handler(scope):
+        counter[0] += 1
+        return {'device_code': f'rl-dev-{counter[0]}', 'user_code': f'RL{counter[0]}-CODE',
+                'verification_uri': 'https://github.com/login/device', 'expires_in': 600, 'interval': 5}
+    monkeypatch.setattr(app.state.github, 'request_device_code', handler, raising=False)
+    return counter
+
+
+def test_device_code_endpoint_allows_requests_within_the_rate_limit(app, monkeypatch):
+    app.state.settings.demo = False
+    counter = _mock_device_code_counter(app, monkeypatch)
+    with TestClient(app) as c:
+        for i in range(15):
+            r = c.post('/auth/github/device/code', headers={'X-Co4-CSRF':'1'})
+            assert r.status_code == 200, f'request {i} should be within the rate limit'
+    assert counter[0] == 15
+
+
+def test_device_code_endpoint_returns_429_once_rate_limit_exceeded(app, monkeypatch):
+    """GitHub caps device-code creation at 50/hour per client_id, shared across every
+    caller. An unauthenticated caller that hammers this endpoint must be throttled before
+    it can exhaust that shared budget or keep writing permanent DeviceFlow rows."""
+    app.state.settings.demo = False
+    counter = _mock_device_code_counter(app, monkeypatch)
+    with TestClient(app) as c:
+        for i in range(15):
+            r = c.post('/auth/github/device/code', headers={'X-Co4-CSRF':'1'})
+            assert r.status_code == 200, f'request {i} should be within the rate limit'
+        blocked = c.post('/auth/github/device/code', headers={'X-Co4-CSRF':'1'})
+        assert blocked.status_code == 429
+        blocked_again = c.post('/auth/github/device/code', headers={'X-Co4-CSRF':'1'})
+        assert blocked_again.status_code == 429
+    # GitHub is never contacted, and no DeviceFlow row is written, once throttled.
+    assert counter[0] == 15
+    with app.state.db.read() as s:
+        rows = s.execute(select(func.count()).select_from(DeviceFlow)).scalar_one()
+    assert rows == 15
 
 
 def test_device_flow_completed_cannot_be_reused(app, monkeypatch):
@@ -166,6 +233,25 @@ def test_poll_device_token_maps_error_codes(app, error_field, expected_status):
     gh = GitHub(app.state.settings, httpx.Client(transport=httpx.MockTransport(handler)))
     result = gh.poll_device_token('dev')
     assert result['status'] == expected_status
+
+
+def test_poll_device_token_slow_down_without_interval_does_not_default_to_5(app):
+    """GitHub's slow_down response omits `interval` when it has no explicit new value to
+    give. The gateway must surface that as None, not silently invent a default -- callers
+    need to distinguish "no interval given" from "GitHub says use exactly 5s"."""
+    def handler(req):
+        return httpx.Response(200, json={'error': 'slow_down'})
+    gh = GitHub(app.state.settings, httpx.Client(transport=httpx.MockTransport(handler)))
+    result = gh.poll_device_token('dev')
+    assert result == {'status': 'slow_down', 'interval': None}
+
+
+def test_poll_device_token_slow_down_with_explicit_interval_is_passed_through(app):
+    def handler(req):
+        return httpx.Response(200, json={'error': 'slow_down', 'interval': 12})
+    gh = GitHub(app.state.settings, httpx.Client(transport=httpx.MockTransport(handler)))
+    result = gh.poll_device_token('dev')
+    assert result == {'status': 'slow_down', 'interval': 12}
 
 def _authorize_device(app, monkeypatch, device_code='dev-cookie', github_id=4242, login='cookie-user'):
     monkeypatch.setattr(app.state.github, 'request_device_code',
