@@ -122,15 +122,7 @@ async function startDeviceFlow(){
     if(signal.aborted) return;
     if(r.status === 'authorized'){
       document.cookie = 'co4_session='+encodeURIComponent(r.session_token)+'; path=/; max-age='+(7*86400)+'; samesite=lax';
-      $('#dialog').close();
-      try {
-        S.boot = await api('/api/bootstrap');
-        S.data = null;
-        await refresh();
-        toast('Signed in as '+(r.user && r.user.login));
-      } catch (e) {
-        toast('Signed in but failed to load dashboard: '+e.message);
-      }
+      location.reload();
       return;
     }
     if(r.status === 'slow_down') interval = (r.interval||interval/1000+5)*1000;
