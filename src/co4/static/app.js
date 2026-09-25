@@ -88,8 +88,8 @@ async function loadTrace(id){let after=0,items=[];while(true){const batch=await 
 async function mutate(path,body={}){await api(path,'POST',body);await refresh();toast('Saved.');}
 async function startDeviceFlow(){
   if(deviceFlowAbort) deviceFlowAbort.abort();
-  deviceFlowAbort = new AbortController();
-  const signal = deviceFlowAbort.signal;
+  const controller = deviceFlowAbort = new AbortController();
+  const signal = controller.signal;  // AbortSignal has no abort(); stop polling via the controller.
   let init;
   try { init = await api('/auth/github/device/code','POST',{},signal) } catch (e) { if(signal.aborted) return; toast('Device flow unavailable: '+e.message); return }
   if(signal.aborted) return;
@@ -107,13 +107,13 @@ async function startDeviceFlow(){
   `;
   showDialog('Sign in with GitHub',html);
   const dialog = $('#dialog');
-  dialog.addEventListener('close',()=>{ signal.abort(); },{ once: true });
+  dialog.addEventListener('close',()=>{ controller.abort(); },{ once: true });
   let interval = (init.interval||5)*1000;
   const deviceCode = init.device_code;
   const copyBtn = document.querySelector('[data-action="device-copy-code"]');
   if(copyBtn) copyBtn.addEventListener('click',()=>{ navigator.clipboard?.writeText(init.user_code); toast('Copied'); });
   const cancelBtn = document.querySelector('[data-action="device-cancel"]');
-  if(cancelBtn) cancelBtn.addEventListener('click',()=>{ signal.abort(); $('#dialog').close(); });
+  if(cancelBtn) cancelBtn.addEventListener('click',()=>{ controller.abort(); $('#dialog').close(); });
   const tick = async () => {
     if(signal.aborted) return;
     let r;
@@ -121,8 +121,17 @@ async function startDeviceFlow(){
     catch (e) { if(signal.aborted) return; const status = $('#device-poll-status'); if(status) status.textContent = 'Error: '+e.message; return }
     if(signal.aborted) return;
     if(r.status === 'authorized'){
-      document.cookie = 'co4_session='+encodeURIComponent(r.session_token)+'; path=/; max-age='+(7*86400)+'; samesite=lax';
-      location.reload();
+      try {
+        S.boot = await api('/api/bootstrap');
+        if(!S.boot.user) throw new Error('the session cookie was not accepted by the browser');
+        $('#dialog').close();
+        S.data = null;
+        await refresh();
+        toast(`Signed in as ${r.user.login}`);
+      } catch (e) {
+        const status = $('#device-poll-status');
+        if(status) status.textContent = 'Signed in on GitHub, but Co4 could not start your session: '+e.message;
+      }
       return;
     }
     if(r.status === 'slow_down') interval = (r.interval||interval/1000+5)*1000;

@@ -53,7 +53,6 @@ def test_device_flow_poll_authorized_creates_session(app, monkeypatch):
         body = r.json()
         assert body['status'] == 'authorized'
         assert body['user']['login'] == 'device-user'
-        assert body['session_token']
         with app.state.db.read() as s:
             sess = s.scalar(select(Session))
             assert sess is not None
@@ -167,3 +166,98 @@ def test_poll_device_token_maps_error_codes(app, error_field, expected_status):
     gh = GitHub(app.state.settings, httpx.Client(transport=httpx.MockTransport(handler)))
     result = gh.poll_device_token('dev')
     assert result['status'] == expected_status
+
+def _authorize_device(app, monkeypatch, device_code='dev-cookie', github_id=4242, login='cookie-user'):
+    monkeypatch.setattr(app.state.github, 'request_device_code',
+                        lambda scope: {'device_code':device_code, 'user_code':'COOK-COOK',
+                                       'verification_uri':'https://github.com/login/device',
+                                       'expires_in':600, 'interval':1},
+                        raising=False)
+    monkeypatch.setattr(app.state.github, 'poll_device_token',
+                        lambda dc: {'status':'authorized', 'access_token':'oauth-tok'},
+                        raising=False)
+    monkeypatch.setattr(app.state.github, 'user',
+                        lambda access: {'id':github_id, 'login':login},
+                        raising=False)
+
+
+def test_device_flow_poll_authorized_sets_httponly_session_cookie(app, monkeypatch):
+    app.state.settings.demo = False
+    _authorize_device(app, monkeypatch)
+    with TestClient(app) as c:
+        c.post('/auth/github/device/code', headers={'X-Co4-CSRF':'1'})
+        r = c.post('/auth/github/device/poll', headers={'X-Co4-CSRF':'1'},
+                   json={'device_code':'dev-cookie'})
+        assert r.status_code == 200
+        set_cookie = r.headers.get('set-cookie', '')
+        assert set_cookie.startswith('co4_session=')
+        assert 'httponly' in set_cookie.lower()
+        assert 'session_token' not in r.json()
+        boot = c.get('/api/bootstrap').json()
+        assert boot['user']['login'] == 'cookie-user'
+
+
+def _loopback_settings(tmp_path, public_url='http://127.0.0.1:8080'):
+    from cryptography.fernet import Fernet
+    from co4.config import Settings
+    key = tmp_path / 'app.pem'
+    key.write_text('unused')
+    return Settings(demo=False, database_url=f"sqlite:///{tmp_path}/loop.db", background=False,
+                    public_url=public_url, data_key=Fernet.generate_key().decode(),
+                    app_id='1', app_slug='co4', private_key_path=str(key),
+                    webhook_secret='w' * 32, client_id='cid', client_secret='csecret')
+
+
+def test_serve_mode_on_loopback_http_starts_with_insecure_cookies(tmp_path):
+    cfg = _loopback_settings(tmp_path)
+    cfg.validate()
+    assert cfg.secure_cookies is False
+
+
+def test_serve_mode_on_non_loopback_http_still_refused(tmp_path):
+    cfg = _loopback_settings(tmp_path, public_url='http://co4.example.com')
+    with pytest.raises(ValueError, match='HTTPS'):
+        cfg.validate()
+
+
+def test_serve_mode_on_https_keeps_secure_cookies(tmp_path):
+    cfg = _loopback_settings(tmp_path, public_url='https://co4.example.com')
+    cfg.validate()
+    assert cfg.secure_cookies is True
+
+
+def test_serve_mode_loopback_device_login_then_mutation_passes_origin_guard(tmp_path, monkeypatch):
+    from co4.app import create_app
+    from co4.github import DemoGitHub
+    app = create_app(_loopback_settings(tmp_path), github=DemoGitHub())
+    try:
+        _authorize_device(app, monkeypatch)
+        with TestClient(app, base_url='http://localhost:8080') as c:
+            c.post('/auth/github/device/code', headers={'X-Co4-CSRF':'1'})
+            r = c.post('/auth/github/device/poll', headers={'X-Co4-CSRF':'1'},
+                       json={'device_code':'dev-cookie'})
+            assert r.status_code == 200
+            created = c.post('/api/devices',
+                             headers={'X-Co4-CSRF':'1', 'Origin':'http://localhost:8080'},
+                             json={'name':'Laptop', 'harness':'claude'})
+            assert created.status_code == 200, created.text
+    finally:
+        app.state.db.engine.dispose()
+
+
+@pytest.mark.parametrize('origin,public_url,expected', [
+    ('http://localhost:8080', 'http://127.0.0.1:8080', True),
+    ('http://127.0.0.1:8080', 'http://localhost:8080', True),
+    ('http://localhost:9090', 'http://127.0.0.1:8080', False),
+    ('https://localhost:8080', 'http://127.0.0.1:8080', False),
+    ('http://evil.example', 'http://127.0.0.1:8080', False),
+    ('https://co4.example.com', 'https://co4.example.com', True),
+    ('http://localhost', 'https://co4.example.com', False),
+    ('https://evil:99999', 'http://127.0.0.1:8080', False),
+    ('https://evil:99999', 'https://co4.example.com', False),
+    ('http://localhost:abc', 'http://127.0.0.1:8080', False),
+    ('http://localhost:abc', 'https://co4.example.com', False),
+])
+def test_origins_match_relaxes_only_between_loopback_hosts(origin, public_url, expected):
+    from co4.app import _origins_match
+    assert _origins_match(origin, public_url) is expected

@@ -2,7 +2,16 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlparse
 from cryptography.fernet import Fernet
+
+LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+def is_loopback_url(url: str) -> bool:
+    try:
+        return urlparse(url).hostname in LOOPBACK_HOSTS
+    except ValueError:
+        return False
 
 @dataclass
 class Settings:
@@ -37,7 +46,10 @@ class Settings:
         if missing:
             raise ValueError("Missing production settings: " + ", ".join(missing))
         if not self.public_url.startswith("https://"):
-            raise ValueError("Production requires an HTTPS CO4_PUBLIC_URL")
+            if not is_loopback_url(self.public_url):
+                raise ValueError("Production requires an HTTPS CO4_PUBLIC_URL")
+            # Browsers drop Secure cookies over plain-HTTP loopback, which breaks every login path.
+            self.secure_cookies = False
         if len(self.webhook_secret) < 32:
             raise ValueError("GITHUB_WEBHOOK_SECRET must contain at least 32 characters")
         Fernet(self.data_key.encode())

@@ -19,7 +19,6 @@ class DevicePollResponse(BaseModel):
     """Not strict — server returns more fields sometimes."""
     model_config = ConfigDict(extra="ignore")
     status: Literal["pending", "slow_down", "expired", "denied", "authorized"]
-    session_token: Optional[str] = None
     user: Optional[dict] = None
 
 class Policy(Strict):

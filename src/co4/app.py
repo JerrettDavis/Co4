@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import select
-from co4.config import Settings
+from co4.config import Settings, is_loopback_url
 from co4.db import Database
 from co4.domain import (ACTIVE, Coordinator, audit, fail, get, lease_data, member, project_data,
     public_receipt, status, visible, work_data)
@@ -58,24 +58,27 @@ class BodyLimit:
         await self.app(scope, replay, send)
 
 
-def _origins_match(origin: str, public_url: str, demo: bool) -> bool:
+def _origins_match(origin: str, public_url: str) -> bool:
     """Return True when `origin` should be accepted alongside `public_url`.
 
     Acceptance rules:
       1. Exact match after trailing-slash strip and case folding.
-      2. In demo mode only, both sides resolve to a loopback host
-         (localhost, 127.0.0.1, or ::1) sharing the same scheme and port.
+      2. Both sides resolve to a loopback host (localhost, 127.0.0.1, or ::1)
+         sharing the same scheme and port.
     """
     a = origin.rstrip("/").lower()
     b = public_url.rstrip("/").lower()
     if a == b:
         return True
-    if not demo:
-        return False
     pa, pb = urlparse(origin), urlparse(public_url)
-    loopback = {"localhost", "127.0.0.1", "::1"}
-    return (pa.scheme == pb.scheme and pa.port == pb.port
-            and pa.hostname in loopback and pb.hostname in loopback)
+    if not (is_loopback_url(origin) and is_loopback_url(public_url)):
+        return False
+    if pa.scheme != pb.scheme:
+        return False
+    try:
+        return pa.port == pb.port
+    except ValueError:
+        return False
 
 
 def create_app(settings: Settings | None = None, github=None, db=None) -> FastAPI:
@@ -130,7 +133,7 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
                 if request.headers.get("x-co4-csrf") != "1":
                     return JSONResponse({"detail": "CSRF header required"}, 403)
                 origin = request.headers.get("origin")
-                if origin and not _origins_match(origin, cfg.public_url, cfg.demo):
+                if origin and not _origins_match(origin, cfg.public_url):
                     return JSONResponse({"detail": "Origin is not allowed"}, 403)
         response = await call_next(request)
         response.headers.update({"X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY",
@@ -298,11 +301,7 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
                 record.user_id = u.id
                 s.flush()
                 user_dict = {"id": u.id, "login": u.login, "github_id": u.github_id}
-            return JSONResponse({
-                "status": "authorized",
-                "session_token": raw,
-                "user": user_dict,
-            })
+            return session_cookie(JSONResponse({"status": "authorized", "user": user_dict}), raw)
         if status == "slow_down":
             return JSONResponse({"status": "slow_down", "interval": int(outcome.get("interval", DEVICE_INTERVAL_DEFAULT))})
         if status == "pending":
