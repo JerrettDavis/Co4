@@ -37,3 +37,8 @@ jobs:
           trap 'kill "$SERVER_PID"' EXIT
           python scripts/wait_http.py http://localhost:8765/healthz
           python scripts/browser_smoke.py --url http://localhost:8765
+      - name: Device-flow sign-in against co4 serve and a local GitHub stand-in
+        if: ${{ !cancelled() }}  # independent of the demo walkthrough above; report both results
+        # Starts its own `co4 serve` (loopback HTTP) plus a stdlib mock of github.com's device-flow
+        # endpoints, then drives headless Chromium through the whole sign-in UI.
+        run: python scripts/device_flow_e2e.py --output device-flow-e2e

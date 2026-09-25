@@ -158,3 +158,14 @@ class Outbox(Base):
     locked_until: Mapped[float] = mapped_column(default=0)
     lock_token: Mapped[str] = mapped_column(String(32), default="")
     error: Mapped[str] = mapped_column(Text, default="")
+
+class DeviceFlow(Base):
+    __tablename__ = "device_flow"
+    device_code: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_code: Mapped[str] = mapped_column(String(20), index=True)
+    scope: Mapped[str] = mapped_column(String(500), default="")
+    expires_at: Mapped[float] = mapped_column()
+    interval: Mapped[int] = mapped_column(default=5)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=True)
+    completed_at: Mapped[float] = mapped_column(nullable=True)
+    created_at: Mapped[float] = mapped_column(default=time.time)

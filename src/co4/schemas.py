@@ -1,9 +1,28 @@
 from __future__ import annotations
-from typing import Literal
+from typing import Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 class Strict(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+class DevicePollRequest(Strict):
+    device_code: str = Field(min_length=1, max_length=128)
+
+class DeviceCodeResponse(Strict):
+    device_code: str = Field(min_length=1, max_length=128)
+    user_code: str = Field(min_length=4, max_length=30)
+    verification_uri: str = Field(min_length=1, max_length=500)
+    expires_in: int = Field(ge=1, le=3600)
+    interval: int = Field(ge=1, le=60)
+
+class DevicePollResponse(BaseModel):
+    """Not strict — server returns more fields sometimes."""
+    model_config = ConfigDict(extra="ignore")
+    status: Literal["pending", "slow_down", "expired", "denied", "authorized"]
+    user: Optional[dict] = None
+    # Present only when GitHub's slow_down response supplied an explicit interval;
+    # omitted (not defaulted) when the client must instead increment its own interval.
+    interval: Optional[int] = None
 
 class Policy(Strict):
     access: Literal["open", "verified", "maintainers"] = "verified"

@@ -5,22 +5,32 @@ from pathlib import Path
 from urllib.parse import quote
 import httpx
 import jwt
-from co4.config import Settings
+from co4.config import Settings, is_loopback_url
 
 class GitHubError(RuntimeError):
     pass
+
+
+def _base_url(url: str, default: str) -> str:
+    url = (url or default).rstrip("/")
+    if not url.startswith("https://") and not (url.startswith("http://") and is_loopback_url(url)):
+        raise ValueError("GitHub base URL overrides must use HTTPS, or plain HTTP on a loopback host")
+    return url
+
 
 class GitHub:
     """Narrow GitHub App gateway. No contributor harness credentials leave the device."""
     def __init__(self, settings: Settings, client: httpx.Client | None = None):
         self.settings = settings
         self.client = client or httpx.Client(timeout=25, follow_redirects=False)
+        self.web = _base_url(getattr(settings, "github_url", ""), "https://github.com")
+        self.api = _base_url(getattr(settings, "github_api_url", ""), "https://api.github.com")
 
     def request(self, method: str, path: str, token: str, **kwargs):
         headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
                    "X-GitHub-Api-Version": "2022-11-28"}
         headers.update(kwargs.pop("headers", {}))
-        response = self.client.request(method, "https://api.github.com" + path, headers=headers, **kwargs)
+        response = self.client.request(method, self.api + path, headers=headers, **kwargs)
         if response.status_code >= 400:
             # Never echo tokens or raw API bodies into public audit/error data.
             raise GitHubError(f"GitHub {method} {path.split('?')[0]} returned {response.status_code}")
@@ -34,7 +44,7 @@ class GitHub:
         return self.request("POST", f"/app/installations/{installation}/access_tokens", signed, json=body).json()["token"]
 
     def exchange(self, code: str) -> str:
-        response = self.client.post("https://github.com/login/oauth/access_token", headers={"Accept": "application/json"},
+        response = self.client.post(self.web + "/login/oauth/access_token", headers={"Accept": "application/json"},
             json={"client_id": self.settings.client_id, "client_secret": self.settings.client_secret,
                   "code": code, "redirect_uri": self.settings.public_url + "/auth/github/callback"})
         response.raise_for_status()
@@ -42,6 +52,75 @@ class GitHub:
         if "access_token" not in data:
             raise GitHubError("GitHub sign-in failed; retry the login flow")
         return data["access_token"]
+
+    def request_device_code(self, scope: str) -> dict:
+        """Start a device flow by POSTing to https://github.com/login/device/code.
+        scope example: "read:user user:email"
+        Returns the parsed JSON dict from GitHub.
+        Uses form-encoded data. Accept: application/json header.
+        Tries WITHOUT client_secret first; if GitHub returns invalid_client, retries WITH client_secret.
+        Raises GitHubError on failure. Scrub error messages (no tokens, no body).
+        """
+        base = {"client_id": self.settings.client_id, "scope": scope}
+        for with_secret in (False, True):
+            data = dict(base)
+            if with_secret:
+                data["client_secret"] = self.settings.client_secret
+            response = self.client.post(self.web + "/login/device/code",
+                headers={"Accept": "application/json"}, data=data)
+            if response.status_code >= 400:
+                raise GitHubError(f"GitHub device code returned {response.status_code}")
+            payload = response.json()
+            if payload.get("error") != "invalid_client":
+                return payload
+        raise GitHubError("GitHub device code request rejected client credentials")
+
+    def poll_device_token(self, device_code: str) -> dict:
+        """Poll GitHub for an access_token.
+        POSTs to https://github.com/login/oauth/access_token with grant_type=urn:ietf:params:oauth:grant-type:device_code.
+        Returns a dict. Possible keys:
+          {"status": "authorized", "access_token": str}
+          {"status": "slow_down", "interval": int}
+          {"status": "pending"}
+          {"status": "expired"}        # for expired_token OR access_denied
+          {"status": "denied"}         # only if error is access_denied
+        Raises GitHubError on unexpected error.
+        Same client_secret retry pattern as above.
+        """
+        base = {"client_id": self.settings.client_id,
+                "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+                "device_code": device_code}
+        for with_secret in (False, True):
+            data = dict(base)
+            if with_secret:
+                data["client_secret"] = self.settings.client_secret
+            response = self.client.post(self.web + "/login/oauth/access_token",
+                headers={"Accept": "application/json"}, data=data)
+            if response.status_code >= 400:
+                raise GitHubError(f"GitHub device poll returned {response.status_code}")
+            payload = response.json()
+            if payload.get("error") != "invalid_client":
+                break
+        else:
+            raise GitHubError("GitHub device poll rejected client credentials")
+        error = payload.get("error")
+        if error == "authorization_pending":
+            return {"status": "pending"}
+        if error == "slow_down":
+            # Per the OAuth Device Flow spec, GitHub's slow_down response MAY include an
+            # explicit `interval` (an absolute value to use going forward). When it is
+            # omitted, the caller must increase whatever interval it is already using by
+            # at least 5s -- do not paper over that distinction by guessing a default here.
+            return {"status": "slow_down", "interval": payload.get("interval")}
+        if error == "expired_token":
+            return {"status": "expired"}
+        if error == "access_denied":
+            return {"status": "denied"}
+        if error:
+            raise GitHubError(f"GitHub device poll returned error {error}")
+        if "access_token" in payload:
+            return {"status": "authorized", "access_token": payload["access_token"]}
+        return payload
 
     def user(self, access: str) -> dict:
         return self.request("GET", "/user", access).json()

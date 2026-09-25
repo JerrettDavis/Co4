@@ -100,7 +100,12 @@ def main():
         page.get_by_role('button',name='Approve this commit').click()
         for _ in range(12):
             page.wait_for_timeout(700)
-            page.get_by_role('button',name='Reload review').click()
+            # Approving closes the review dialog; reopen it before polling for publication.
+            if not page.locator('#dialog[open]').count():
+                page.locator('.nav').get_by_role('link',name='Reviews').click()
+                page.locator('[data-action=work]').first.click()
+            else:
+                page.get_by_role('button',name='Reload review').click()
             if page.get_by_role('link',name='View offline submission').count():break
         expect(page.get_by_role('link',name='View offline submission')).to_be_visible()
         checks.append('human-approved fixture publication through dispatcher')

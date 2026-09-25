@@ -1,5 +1,6 @@
 from __future__ import annotations
 import asyncio
+from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 import hashlib
 import hmac
@@ -9,19 +10,20 @@ from pathlib import Path
 import time
 from urllib.parse import urlencode, urlparse
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import select
-from co4.config import Settings
+from co4.config import Settings, is_loopback_url
 from co4.db import Database
 from co4.domain import (ACTIVE, Coordinator, audit, fail, get, lease_data, member, project_data,
     public_receipt, status, visible, work_data)
 from co4.github import DemoGitHub, GitHub, GitHubError
-from co4.models import Audit, Decline, Delivery, Device, Event, Lease, Member, OAuthState, Outbox, Project, Session, User, Work
+from co4.models import Audit, Decline, Delivery, Device, DeviceFlow, Event, Lease, Member, OAuthState, Outbox, Project, Session, User, Work
 from co4.outbox import Dispatcher
-from co4.schemas import (Approval, CheckpointRequest, Complete, DeviceCreate, DeviceUpdate, Dib,
-    EnrollProject, Failure, Heartbeat, MemberUpdate, Policy, Poll, ProjectUpdate, Watch, WorkerEvent)
+from co4.schemas import (Approval, CheckpointRequest, Complete, DeviceCodeResponse, DeviceCreate,
+    DevicePollRequest, DevicePollResponse, DeviceUpdate, Dib, EnrollProject, Failure, Heartbeat,
+    MemberUpdate, Policy, Poll, ProjectUpdate, Watch, WorkerEvent)
 from co4.security import Vault, digest, redact, token
 from co4.seed import seed
 
@@ -57,24 +59,55 @@ class BodyLimit:
         await self.app(scope, replay, send)
 
 
-def _origins_match(origin: str, public_url: str, demo: bool) -> bool:
+class SlidingWindowLimiter:
+    """Minimal in-process, per-key sliding-window rate limiter.
+
+    Single-process, in-memory only -- no Redis or other shared store, which is fine for
+    a small app like this one and adds no new dependency. It exists to keep an
+    unauthenticated caller from hammering an endpoint that fans out to a scarce shared
+    quota (e.g. GitHub's 50/hour device-code limit per client_id) or that writes a
+    permanent row per call.
+    """
+    def __init__(self, limit: int, window_seconds: float):
+        self.limit = limit
+        self.window_seconds = window_seconds
+        self._hits: dict[str, deque] = defaultdict(deque)
+
+    def hit(self, key: str, now: float | None = None) -> bool:
+        """Record an attempt for `key`. Returns True if it is allowed, False if `key`
+        has already reached the limit within the current window."""
+        now = time.time() if now is None else now
+        bucket = self._hits[key]
+        cutoff = now - self.window_seconds
+        while bucket and bucket[0] <= cutoff:
+            bucket.popleft()
+        if len(bucket) >= self.limit:
+            return False
+        bucket.append(now)
+        return True
+
+
+def _origins_match(origin: str, public_url: str) -> bool:
     """Return True when `origin` should be accepted alongside `public_url`.
 
     Acceptance rules:
       1. Exact match after trailing-slash strip and case folding.
-      2. In demo mode only, both sides resolve to a loopback host
-         (localhost, 127.0.0.1, or ::1) sharing the same scheme and port.
+      2. Both sides resolve to a loopback host (localhost, 127.0.0.1, or ::1)
+         sharing the same scheme and port.
     """
     a = origin.rstrip("/").lower()
     b = public_url.rstrip("/").lower()
     if a == b:
         return True
-    if not demo:
-        return False
     pa, pb = urlparse(origin), urlparse(public_url)
-    loopback = {"localhost", "127.0.0.1", "::1"}
-    return (pa.scheme == pb.scheme and pa.port == pb.port
-            and pa.hostname in loopback and pb.hostname in loopback)
+    if not (is_loopback_url(origin) and is_loopback_url(public_url)):
+        return False
+    if pa.scheme != pb.scheme:
+        return False
+    try:
+        return pa.port == pb.port
+    except ValueError:
+        return False
 
 
 def create_app(settings: Settings | None = None, github=None, db=None) -> FastAPI:
@@ -87,6 +120,17 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
     dispatcher = Dispatcher(database, coordinator, gateway)
     if cfg.demo:
         seed(database)
+
+    DEVICE_SCOPES = "read:user user:email"
+    DEVICE_INTERVAL_DEFAULT = 5
+    DEVICE_EXPIRES_IN_DEFAULT = 600  # 10 minutes
+    DEVICE_FLOW_POST_PATHS = {"/auth/github/device/code", "/auth/github/device/poll"}
+    # GitHub allows 50 device-code requests/hour per client_id, shared across every caller.
+    # Stay well under that per source address so one noisy or abusive client cannot exhaust
+    # the shared budget (or spam a permanent DeviceFlow row per call) for everyone else.
+    DEVICE_CODE_RATE_LIMIT = 15
+    DEVICE_CODE_RATE_WINDOW = 3600.0
+    device_code_limiter = SlidingWindowLimiter(DEVICE_CODE_RATE_LIMIT, DEVICE_CODE_RATE_WINDOW)
 
     @asynccontextmanager
     async def lifespan(app):
@@ -119,12 +163,12 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
 
     @app.middleware("http")
     async def guard(request: Request, call_next):
-        if request.method not in {"GET", "HEAD", "OPTIONS"} and not request.url.path.startswith("/webhooks/"):
+        if request.method not in {"GET", "HEAD", "OPTIONS"} and not request.url.path.startswith("/webhooks/") and request.url.path not in DEVICE_FLOW_POST_PATHS:
             if request.cookies.get("co4_session"):
                 if request.headers.get("x-co4-csrf") != "1":
                     return JSONResponse({"detail": "CSRF header required"}, 403)
                 origin = request.headers.get("origin")
-                if origin and not _origins_match(origin, cfg.public_url, cfg.demo):
+                if origin and not _origins_match(origin, cfg.public_url):
                     return JSONResponse({"detail": "Origin is not allowed"}, 403)
         response = await call_next(request)
         response.headers.update({"X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY",
@@ -235,6 +279,108 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
         response = session_cookie(RedirectResponse("/"), raw)
         response.delete_cookie("co4_oauth_state", path="/auth/github/callback")
         return response
+
+    @app.post("/auth/github/device/code")
+    def device_flow_init(request: Request):
+        """Initiate device flow. Returns DeviceCodeResponse."""
+        if cfg.demo:
+            fail(404, "Not found")
+        client_host = request.client.host if request.client else "unknown"
+        if not device_code_limiter.hit(f"device-code:{client_host}"):
+            fail(429, "Too many device sign-in attempts from this address. Try again later.")
+        data = gateway.request_device_code(DEVICE_SCOPES)
+        interval = int(data.get("interval") or DEVICE_INTERVAL_DEFAULT)
+        expires_at = time.time() + int(data.get("expires_in") or DEVICE_EXPIRES_IN_DEFAULT)
+        with database.transaction() as s:
+            s.add(DeviceFlow(
+                device_code=data["device_code"],
+                user_code=data["user_code"],
+                scope=DEVICE_SCOPES,
+                expires_at=expires_at,
+                interval=interval,
+            ))
+        return JSONResponse({
+            "device_code": data["device_code"],
+            "user_code": data["user_code"],
+            "verification_uri": data["verification_uri"],
+            "expires_in": int(data.get("expires_in") or DEVICE_EXPIRES_IN_DEFAULT),
+            "interval": interval,
+        })
+
+    @app.post("/auth/github/device/poll")
+    def device_flow_poll(body: DevicePollRequest):
+        """Poll device flow. Returns DevicePollResponse (or close shape)."""
+        if cfg.demo:
+            fail(404, "Not found")
+        with database.read() as s:
+            record = s.get(DeviceFlow, body.device_code)
+            if not record:
+                fail(404, "Unknown device code")
+            if record.completed_at:
+                fail(409, "Device code already consumed")
+            if record.expires_at <= time.time():
+                fail(400, "Device code expired")
+        outcome = gateway.poll_device_token(body.device_code)
+        status = outcome.get("status")
+        if status == "authorized":
+            access = outcome["access_token"]
+            identity = gateway.user(access)
+            with database.transaction() as s:
+                record = s.get(DeviceFlow, body.device_code)
+                if record.completed_at:
+                    fail(409, "Device code already consumed")
+                u = s.scalar(select(User).where(User.github_id == identity["id"]))
+                if not u:
+                    u = User(github_id=identity["id"], login=identity["login"])
+                    s.add(u); s.flush()
+                u.login = identity["login"]
+                raw = create_session(s, u, access)
+                record.completed_at = time.time()
+                record.user_id = u.id
+                s.flush()
+                user_dict = {"id": u.id, "login": u.login, "github_id": u.github_id}
+            return session_cookie(JSONResponse({"status": "authorized", "user": user_dict}), raw)
+        if status == "slow_down":
+            # Only surface an `interval` when GitHub actually gave us an explicit one.
+            # Omitting it lets the frontend tell "GitHub said use exactly N seconds" apart
+            # from "GitHub said nothing; add 5s to whatever interval you're already using."
+            explicit_interval = outcome.get("interval")
+            body = {"status": "slow_down"}
+            if explicit_interval is not None:
+                body["interval"] = int(explicit_interval)
+            return JSONResponse(body)
+        if status == "pending":
+            return JSONResponse({"status": "pending"})
+        if status == "expired":
+            return JSONResponse({"status": "expired"})
+        if status == "denied":
+            return JSONResponse({"status": "denied"})
+        fail(502, "Unexpected device flow outcome")
+
+    @app.get("/auth/github/device")
+    def device_flow_page(code: str = ""):
+        """HTML page showing the user_code and a link to GitHub's verification URL.
+        The Co4 app's frontend does the actual polling — this page is a static fallback
+        that lets the user view their code in a new tab."""
+        import html as html_mod
+        safe_code = html_mod.escape(code)
+        body = f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Co4 · Device sign-in</title>
+<style>body{{font-family:system-ui,sans-serif;max-width:560px;margin:3rem auto;padding:0 1rem;color:#123e54}}
+code{{font-family:ui-monospace,Menlo,monospace;background:#f3f6f8;padding:.15rem .4rem;border-radius:4px}}
+.btn{{display:inline-block;padding:.6rem 1rem;background:#123e54;color:#fff;border:0;border-radius:6px;font:inherit;cursor:pointer;text-decoration:none}}
+.muted{{color:#5a6e7e}}
+#user_code{{font-size:2.5rem;letter-spacing:.15em;background:#f3f6f8;padding:1rem;border-radius:8px;text-align:center;font-weight:bold}}
+</style></head>
+<body>
+<h1>Sign in with GitHub device flow</h1>
+<p>1. Open <a href="https://github.com/login/device" target="_blank" rel="noopener">https://github.com/login/device</a> in any browser and sign in to GitHub.</p>
+<p>2. Enter this code when prompted:</p>
+<p id="user_code">{safe_code or '—'}</p>
+<p class="muted">The Co4 app polls GitHub automatically while you complete authorization. This page is a fallback view of the code.</p>
+<p><a class="btn" href="https://github.com/login/device" target="_blank" rel="noopener">Open GitHub device page</a></p>
+</body></html>"""
+        return HTMLResponse(body)
 
     @app.post("/auth/logout")
     def logout(request: Request, u=Depends(user)):

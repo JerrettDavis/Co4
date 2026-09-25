@@ -16,7 +16,7 @@ dependencies = [
 ]
 [project.optional-dependencies]
 postgres = ["psycopg[binary]>=3.2,<4"]
-test = ["pytest==9.0.2", "playwright>=1.50,<2"]
+test = ["pytest==9.0.2", "pytest-bdd>=8.1,<9", "playwright>=1.50,<2"]
 [project.scripts]
 co4 = "co4.cli:main"
 [tool.setuptools.packages.find]
@@ -27,3 +27,4 @@ co4 = ["static/*"]
 pythonpath = ["src"]
 testpaths = ["tests"]
 addopts = "-ra"
+bdd_features_base_dir = "specs"
