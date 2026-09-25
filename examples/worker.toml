@@ -1,0 +1,50 @@
+# Read SECURITY.md before enabling a real worker. Do not put credentials in this file.
+server = "https://co4.example.org"
+root = "~/.co4"
+token_env = "CO4_DEVICE_TOKEN"
+git_token_env = "CO4_GIT_TOKEN"
+
+# Set true only after reviewing local execution and BEFORE-review checkpoint publication.
+acknowledge_code_execution = false
+allow_checkpoint_push = false
+
+# Match the harness selected for your device. Install and authenticate it separately.
+harnesses = ["claude", "codex", "copilot"]
+# Native terminal is the default in NEW example configs. Old configs without this
+# field keep noninteractive behavior. A CLI --interactive/--noninteractive flag overrides it.
+execution_mode = "interactive"
+# Local CLI login, NOT a promise of subscription-only/free use. Verify account and
+# provider overage/spending controls. Explicit provider env credentials require opt-in.
+credential_policy = "native_login" # or "explicit_credentials"
+interactive_idle_seconds = 1800
+
+# model = "your-provider-supported-model-id"
+# Allow only the provider authentication variables actually needed by your chosen CLI.
+harness_env = []
+# With credential_policy="explicit_credentials" only:
+# ["ANTHROPIC_API_KEY"] or ["OPENAI_API_KEY"] or ["COPILOT_GITHUB_TOKEN"]
+# Native login can allow alternate config paths, e.g. ["CODEX_HOME", "CLAUDE_CONFIG_DIR"].
+
+pick_next = true
+poll_seconds = 15
+heartbeat_seconds = 10
+checkpoint_seconds = 180
+phase_timeout_seconds = 3600
+idle_seconds = 900
+test_timeout_seconds = 600
+test_idle_seconds = 300
+
+[repositories."YOUR-ORG/YOUR-REPO"]
+push_repository = "YOUR-LOGIN/YOUR-FORK"
+test_profile = "default"
+# Argument array, not a shell command. Use an appropriate command for YOUR repository.
+test_command = ["dotnet", "test", "--verbosity", "minimal"]
+# Narrow this to genuine regression test files. Do not include production code globs.
+test_globs = ["tests/**/*.cs"]
+
+# Python example instead of the .NET entry above:
+# [repositories."YOUR-ORG/YOUR-PYTHON-REPO"]
+# push_repository = "YOUR-LOGIN/YOUR-PYTHON-FORK"
+# test_profile = "default"
+# test_command = ["python", "-m", "pytest", "-q"]
+# test_globs = ["tests/**/*.py"]
