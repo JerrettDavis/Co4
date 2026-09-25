@@ -33,7 +33,7 @@ function safeUrl(url){return url && (/^https:\/\/github\.com\//.test(url)||/^\/d
 function head(title,sub,action=''){return `<section class="pagehead"><div><h1>${title}</h1><p class="muted">${sub}</p></div>${action}</section>`;}
 function empty(title,body){return `<div class="empty"><b>${title}</b>${body}</div>`;}
 function row(w){const p=project(w.project_id);const l=lease(w.active_lease);return `<div class="row"><div><button class="title" data-action="work" data-id="${w.id}">${esc(w.title)}</button><div class="meta"><span>${esc(p?.repository)} #${w.number}</span>${w.labels.slice(0,2).map(x=>`<span class="tag">${esc(x)}</span>`).join('')}</div></div><div class="rowaside">${badge(l?.stale?'stale':w.state)}${l?`<span class="small muted">${esc(l.phase)}</span>`:''}</div></div>`;}
-function landing(){return `<div class="landing"><header class="landingheader">${brand}<span class="eyebrow">Code · Collaboration · Cooperation · Computation</span>${S.boot.demo?'<span class="demo-label">Offline demo</span>':'<a class="btn" href="/auth/github">Sign in with GitHub</a>'}</header><main id="main"><section class="landinghero"><span class="eyebrow">A shared effort. A clear handoff.</span><h1>Good projects deserve<br>more hands on deck.</h1><p>Bring your coding tools. Pick the projects you care about. Co4 connects the work, the people, and the permissions, without becoming another place to write code.</p>${S.boot.demo?`<div class="loginchoose">${button('Explore as maintainer','login','maintainer','primary')}${button('Contribute work','login','contributor')}${button('Handover contributor','login','backup')}</div><p class="small muted">Local fixture identities. No real GitHub writes, model calls, or payment activity.</p>`:'<a class="btn primary" href="/auth/github">Get started with GitHub →</a>'}</section><section class="landingcards"><article><span class="eyebrow">01 / Govern</span><h3>Keep ownership with maintainers.</h3><p>Validate requests, choose trusted contributors, define budgets, and set the rules for your repository.</p></article><article><span class="eyebrow">02 / Contribute</span><h3>Your device. Your tools. Your choice.</h3><p>Use Claude Code, Codex, or Copilot. Decide when work can start, and pause or decline an allocation.</p></article><article><span class="eyebrow">03 / Review</span><h3>Nothing gets a PR by surprise.</h3><p>Review the changes, tests, and execution receipt. Approve the exact commit before Co4 opens a draft PR.</p></article></section></main><footer class="footerline"><span>GitHub first. Harness independent. Self-hostable.</span><span>Co4 v0.1.0-alpha.2</span></footer></div>`;}
+function landing(){return `<div class="landing"><header class="landingheader">${brand}<span class="eyebrow">Code · Collaboration · Cooperation · Computation</span>${S.boot.demo?'<span class="demo-label">Offline demo</span>':'<div class="btn-group"><a class="btn" href="/auth/github">Sign in with GitHub</a><button type="button" class="btn" data-action="device-login">Sign in with device flow</button></div>'}</header><main id="main"><section class="landinghero"><span class="eyebrow">A shared effort. A clear handoff.</span><h1>Good projects deserve<br>more hands on deck.</h1><p>Bring your coding tools. Pick the projects you care about. Co4 connects the work, the people, and the permissions, without becoming another place to write code.</p>${S.boot.demo?`<div class="loginchoose">${button('Explore as maintainer','login','maintainer','primary')}${button('Contribute work','login','contributor')}${button('Handover contributor','login','backup')}</div><p class="small muted">Local fixture identities. No real GitHub writes, model calls, or payment activity.</p>`:'<div class="btn-group"><a class="btn primary" href="/auth/github">Get started with GitHub →</a><button type="button" class="btn" data-action="device-login">Sign in with device flow</button></div>'}</section><section class="landingcards"><article><span class="eyebrow">01 / Govern</span><h3>Keep ownership with maintainers.</h3><p>Validate requests, choose trusted contributors, define budgets, and set the rules for your repository.</p></article><article><span class="eyebrow">02 / Contribute</span><h3>Your device. Your tools. Your choice.</h3><p>Use Claude Code, Codex, or Copilot. Decide when work can start, and pause or decline an allocation.</p></article><article><span class="eyebrow">03 / Review</span><h3>Nothing gets a PR by surprise.</h3><p>Review the changes, tests, and execution receipt. Approve the exact commit before Co4 opens a draft PR.</p></article></section></main><footer class="footerline"><span>GitHub first. Harness independent. Self-hostable.</span><span>Co4 v0.1.0-alpha.2</span></footer></div>`;}
 function render(){
   if(!S.boot)return;
   if(!S.boot.user){$('#app').innerHTML=landing();return;}
@@ -85,6 +85,56 @@ function drawWork(){
 function reviewTab(l){if(S.tab==='summary')return `<div class="prewrap">${esc(l.summary||'The contributor has not submitted a completion summary yet.')}</div>`;if(S.tab==='receipt')return `<pre class="diff">${esc(JSON.stringify(l.receipt,null,2))}</pre><p class="help">This allowlisted metadata is included with the PR. Private prompts, local paths, device identities, and transcripts are excluded.</p>`;if(S.tab==='trace')return '<div class="notice">Private, redacted server trace. The device retains its encrypted full local transcript. This content is never attached to a PR.</div><div id="trace-content" class="prewrap">Loading trace…</div>';return l.diff?`<pre class="diff">${l.diff.split('\n').map(line=>`<span class="${line.startsWith('+')?'add':line.startsWith('-')?'remove':'context'}">${esc(line)||' '}</span>`).join('')}</pre>`:empty('No review diff yet.','The worker submits its tested commit when all workflow stages are complete.');}
 async function loadTrace(id){let after=0,items=[];while(true){const batch=await api(`/api/leases/${id}/events?after=${after}`);items.push(...batch);if(batch.length<200)break;after=batch.at(-1).sequence;}if($('#trace-content'))$('#trace-content').textContent=items.map(e=>`[${e.sequence} · ${e.kind}]\n${e.text}`).join('\n\n')||'No retained events.';}
 async function mutate(path,body={}){await api(path,'POST',body);await refresh();toast('Saved.');}
+async function startDeviceFlow(){
+  let init;
+  try { init = await api('/auth/github/device/code','POST',{}) } catch (e) { toast('Device flow unavailable: '+e.message); return }
+  const expiresAt = new Date(init.expires_in*1000+Date.now()).toLocaleTimeString();
+  const html = `
+    <p>On any browser, open <a href="${esc(init.verification_uri)}" target="_blank" rel="noopener">${esc(init.verification_uri)}</a> and sign in to GitHub.</p>
+    <p>Then enter this code:</p>
+    <p class="device-code mono" id="device-user-code">${esc(init.user_code)}</p>
+    <p class="small muted">Code expires at ${esc(expiresAt)}. Keep this tab open — sign-in completes automatically once you approve on GitHub.</p>
+    <div id="device-poll-status" class="notice">Waiting for you to authorize on GitHub…</div>
+    <div class="actions">
+      <button type="button" class="btn small" data-action="device-copy-code">Copy code</button>
+      <button type="button" class="btn small" data-action="device-cancel">Cancel</button>
+    </div>
+  `;
+  showDialog('Sign in with GitHub',html);
+  let interval = (init.interval||5)*1000;
+  const deviceCode = init.device_code;
+  let cancelled = false;
+  const copyBtn = document.querySelector('[data-action="device-copy-code"]');
+  if(copyBtn) copyBtn.addEventListener('click',()=>{ navigator.clipboard?.writeText(init.user_code); toast('Copied'); });
+  const cancelBtn = document.querySelector('[data-action="device-cancel"]');
+  if(cancelBtn) cancelBtn.addEventListener('click',()=>{ cancelled = true; $('#dialog').close(); });
+  const tick = async () => {
+    if(cancelled) return;
+    let r;
+    try { r = await api('/auth/github/device/poll','POST',{device_code:deviceCode}) }
+    catch (e) { const status = $('#device-poll-status'); if(status) status.textContent = 'Error: '+e.message; return }
+    if(r.status === 'authorized'){
+      document.cookie = 'co4_session='+encodeURIComponent(r.session_token)+'; path=/; max-age='+(7*86400)+'; samesite=lax';
+      $('#dialog').close();
+      try {
+        S.boot = await api('/api/bootstrap');
+        S.data = null;
+        await refresh();
+        toast('Signed in as '+(r.user && r.user.login));
+      } catch (e) {
+        toast('Signed in but failed to load dashboard: '+e.message);
+      }
+      return;
+    }
+    if(r.status === 'slow_down') interval = (r.interval||interval/1000+5)*1000;
+    if(r.status === 'expired'){ const status = $('#device-poll-status'); if(status) status.textContent = 'Code expired. Please restart sign-in.'; return }
+    if(r.status === 'denied'){ const status = $('#device-poll-status'); if(status) status.textContent = 'Authorization denied on GitHub.'; return }
+    const status = $('#device-poll-status');
+    if(status) status.textContent = 'Waiting for GitHub approval ('+r.status+')…';
+    setTimeout(tick,interval);
+  };
+  setTimeout(tick,interval);
+}
 async function handleAction(action,id){
   switch(action){
     case 'close':$('#dialog').close();await refresh();break;
@@ -109,6 +159,7 @@ async function handleAction(action,id){
     case 'approve':{if(!$('#review-confirm')?.checked)throw new Error('Confirm that you reviewed the complete changes and evidence before approving.');const l=S.detail.leases.find(x=>x.id===id);await mutate(`/api/leases/${id}/approve`,{sha:l.checkpoint.sha,review_digest:l.review_digest,confirm_reviewed:true});$('#dialog').close();break;}
     case 'copy-command':{const l=S.detail.leases.find(x=>x.id===id);await navigator.clipboard.writeText(`/co4 approve ${l.checkpoint.sha} ${l.review_digest}`);toast('SHA-bound GitHub approval command copied.');break;}
     case 'retry-job':await mutate(`/api/outbox/${id}/retry`);toast('Delivery queued for retry.');break;
+    case 'device-login':await startDeviceFlow();break;
   }
 }
 document.addEventListener('click',async event=>{const target=event.target.closest('[data-action]');if(!target)return;event.preventDefault();if(target.disabled)return;target.disabled=true;try{await handleAction(target.dataset.action,target.dataset.id);}catch(e){const error=$('#form-error');if($('#dialog').open&&error)error.textContent=e.message;else toast(e.message);}finally{target.disabled=false;}});

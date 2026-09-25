@@ -46,6 +46,24 @@ PR heads use App-created `co4/submission/<lease>/<sha-prefix>` branches so a lat
 
 Co4 owns the allocation lease in its database and mirrors progress through a status comment. It does not manipulate GitHub's native assignee field in this release. A future assignee mirror must handle GitHub's collaborator restrictions without treating the assignee list as a distributed lock.
 
+## Device flow (local development)
+
+When the workstation running `co4 serve` cannot or should not complete a browser-based OAuth redirect (headless servers, kiosks, restricted corporate networks, no public tunnel), start a device flow from Co4's login page and finish authorization on any other device with a browser.
+
+Three-step flow:
+
+1. From Co4's login page, click **Sign in with device flow** (sibling button to the standard "Sign in with GitHub"). Co4 calls GitHub's `POST https://github.com/login/device/code` and receives a one-time `user_code` plus a verification URL.
+2. On any browser (phone, laptop, other workstation), open the verification URL shown in the Co4 dialog and enter the user_code. Approve the requested scopes on GitHub.
+3. Co4 polls `POST https://github.com/login/oauth/access_token` automatically. On success, Co4 mints a session cookie for the original browser tab and signs the user in.
+
+The user_code expires after the time shown in the dialog (typically ten minutes). Co4 polls every few seconds and honors GitHub's `slow_down` signal by extending the interval. A consumed code cannot be exchanged twice.
+
+**Limitations:**
+- Uses OAuth App credentials (`GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET`); does not require a GitHub App installation.
+- Rate limits apply per client_id: 50 device-code requests per hour and standard OAuth rate limits on the access_token endpoint.
+- Device flow is unavailable in offline demo mode (`CO4_DEMO=true`); the endpoint returns 404 in that case.
+- The flow works on `127.0.0.1` and within the local network; no public tunnel is required because the user's browser initiates GitHub's authorization, not the Co4 server.
+
 ## Staging acceptance gate
 
 Test sign-in and App installation; enrollment by an actual admin; rejection of a non-admin; signed issue ingestion; untrusted ready-label behavior; a real worker checkpoint; fork visibility where used; server-derived review diff; human approval and exact draft head; no PR before approval; App removal and device revocation; failed GitHub delivery and retry; and checkpoint takeover. Repeat the workflow with each of the three real harnesses. Compare any exposed usage with provider-visible accounting without inventing missing counters.
@@ -57,6 +75,6 @@ Test sign-in and App installation; enrollment by an actual admin; rejection of a
 - [Choosing permissions for a GitHub App](https://docs.github.com/en/apps/creating-github-apps/setting-up-a-github-app/choosing-permissions-for-a-github-app)
 - [Repository collaborator permissions endpoint](https://docs.github.com/en/rest/collaborators/collaborators#get-repository-permissions-for-a-user)
 
-Reviewed 2026-09-24. Repository policies, organization restrictions, and App permissions must be verified in the actual installation.
+Reviewed 2026-09-24. Device flow is enabled by default and adds no new environment variables. Repository policies, organization restrictions, and App permissions must be verified in the actual installation.
 
 The gateway pins GitHub REST API version `2022-11-28`, which GitHub currently lists as supported through March 10, 2028. Review response changes before upgrading the pin. [API version support](https://docs.github.com/en/rest/about-the-rest-api/api-versions).
