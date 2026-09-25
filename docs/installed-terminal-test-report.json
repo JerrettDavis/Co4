@@ -1,0 +1,15 @@
+{
+  "status": "passed",
+  "installed_package": "co4-orchestrator 0.1.0a2",
+  "package_location": "/mnt/data/co4-alpha2-installed/lib/python3.13/site-packages/co4/__init__.py",
+  "mode": "installed Linux PTY with deterministic local child",
+  "checks": [
+    "imports installed wheel outside checkout",
+    "PTY exec helper is packaged",
+    "all three native argv contracts",
+    "real controlling terminal and keyboard round trip",
+    "terminal settings/blocking mode restored",
+    "piped input rejected without fallback"
+  ],
+  "live_providers": false
+}

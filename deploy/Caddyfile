@@ -1,0 +1,5 @@
+# Replace hostname; run Caddy on the same host as the loopback-published app.
+co4.example.org {
+    reverse_proxy 127.0.0.1:8080
+    encode gzip
+}

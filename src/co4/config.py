@@ -1,0 +1,45 @@
+from __future__ import annotations
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+from cryptography.fernet import Fernet
+
+@dataclass
+class Settings:
+    database_url: str = field(default_factory=lambda: os.getenv("CO4_DATABASE_URL", "sqlite:///./co4.db"))
+    public_url: str = field(default_factory=lambda: os.getenv("CO4_PUBLIC_URL", "http://localhost:8080").rstrip("/"))
+    demo: bool = field(default_factory=lambda: os.getenv("CO4_DEMO", "false").lower() == "true")
+    data_key: str = field(default_factory=lambda: os.getenv("CO4_DATA_KEY", ""))
+    app_id: str = field(default_factory=lambda: os.getenv("GITHUB_APP_ID", ""))
+    app_slug: str = field(default_factory=lambda: os.getenv("GITHUB_APP_SLUG", ""))
+    private_key_path: str = field(default_factory=lambda: os.getenv("GITHUB_APP_PRIVATE_KEY_PATH", ""))
+    webhook_secret: str = field(default_factory=lambda: os.getenv("GITHUB_WEBHOOK_SECRET", ""))
+    client_id: str = field(default_factory=lambda: os.getenv("GITHUB_CLIENT_ID", ""))
+    client_secret: str = field(default_factory=lambda: os.getenv("GITHUB_CLIENT_SECRET", ""))
+    background: bool = True
+    secure_cookies: bool = True
+    stale_seconds: int = 12 * 3600
+    recovery_seconds: int = 12 * 3600
+    event_retention_days: int = 30
+
+    def validate(self) -> None:
+        if self.demo:
+            self.secure_cookies = self.public_url.startswith("https://")
+            if not self.data_key:
+                # Stable demo-only key. No real integrations or secrets permitted in demo.
+                self.data_key = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+            return
+        missing = [k for k, v in {
+            "CO4_DATA_KEY": self.data_key, "GITHUB_APP_ID": self.app_id,
+            "GITHUB_APP_SLUG": self.app_slug, "GITHUB_APP_PRIVATE_KEY_PATH": self.private_key_path,
+            "GITHUB_WEBHOOK_SECRET": self.webhook_secret, "GITHUB_CLIENT_ID": self.client_id,
+            "GITHUB_CLIENT_SECRET": self.client_secret}.items() if not v]
+        if missing:
+            raise ValueError("Missing production settings: " + ", ".join(missing))
+        if not self.public_url.startswith("https://"):
+            raise ValueError("Production requires an HTTPS CO4_PUBLIC_URL")
+        if len(self.webhook_secret) < 32:
+            raise ValueError("GITHUB_WEBHOOK_SECRET must contain at least 32 characters")
+        Fernet(self.data_key.encode())
+        if not Path(self.private_key_path).is_file():
+            raise ValueError("GitHub App private key file not found")

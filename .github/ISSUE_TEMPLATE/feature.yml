@@ -1,0 +1,21 @@
+name: Feature request
+description: A contribution with explicit scope and acceptance criteria.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: User and problem
+    validations:
+      required: true
+  - type: textarea
+    id: criteria
+    attributes:
+      label: Acceptance criteria and behavior examples
+      description: Given/When/Then examples are useful.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Non-goals, constraints and risks

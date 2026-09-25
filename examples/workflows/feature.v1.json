@@ -1,0 +1,17 @@
+{
+  "access": "verified",
+  "require_validation": true,
+  "ready_label": "co4:ready",
+  "excluded_labels": [
+    "security",
+    "co4:hold"
+  ],
+  "maintainer_labels": [
+    "breaking-change"
+  ],
+  "max_task_tokens": 100000,
+  "require_maintainer_approval": true,
+  "test_profile": "default",
+  "prompt_notes": "State acceptance criteria, data and API compatibility constraints, and non-goals before implementing. Cover new observable behavior with failing tests, then implement without weakening the contract. Include upgrade or migration considerations in the summary.",
+  "strategy": "priority_age"
+}

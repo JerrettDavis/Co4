@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=82"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "co4-orchestrator"
+version = "0.1.0a2"
+description = "GitHub-first cooperative development governance and contributor-device orchestration"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{name = "Co4 contributors"}]
+dependencies = [
+  "fastapi==0.128.2", "uvicorn==0.48.0", "SQLAlchemy==2.0.50",
+  "httpx==0.28.1", "PyJWT==2.13.0", "cryptography==46.0.4", "pydantic==2.13.4"
+]
+[project.optional-dependencies]
+postgres = ["psycopg[binary]>=3.2,<4"]
+test = ["pytest==9.0.2", "playwright>=1.50,<2"]
+[project.scripts]
+co4 = "co4.cli:main"
+[tool.setuptools.packages.find]
+where = ["src"]
+[tool.setuptools.package-data]
+co4 = ["static/*"]
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-ra"

@@ -1,0 +1,17 @@
+{
+  "mode": "DOM browser with live HTTP API bridge",
+  "checks": [
+    "maintainer sign-in and dashboard",
+    "queue filtering and human validation",
+    "maintainer policy editor",
+    "project membership UI",
+    "one-time device credential creation",
+    "live-HTTP CLI worker: real Git and red/green tests",
+    "full diff, private traces, and affirmative review gate",
+    "human-approved fixture publication through dispatcher",
+    "390px responsive layout without horizontal overflow"
+  ],
+  "check_count": 9,
+  "javascript_errors": [],
+  "status": "passed"
+}

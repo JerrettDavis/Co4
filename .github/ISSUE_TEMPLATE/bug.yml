@@ -1,0 +1,22 @@
+name: Bug report
+description: A reproducible problem with expected behavior.
+labels: [bug]
+body:
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and actual behavior
+      description: Include a minimal example and acceptance criteria. Do not include secrets.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction and environment
+      description: Co4 version, operating system, harness version, and safe reproduction steps.
+    validations:
+      required: true
+  - type: textarea
+    id: tests
+    attributes:
+      label: Proposed regression test

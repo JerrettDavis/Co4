@@ -1,0 +1,15 @@
+{
+  "status": "passed",
+  "installed_package": "co4-orchestrator 0.1.0a1",
+  "mode": "offline fixture over real HTTP",
+  "checks": [
+    "installed entry point",
+    "server startup outside source tree",
+    "packaged static assets",
+    "installed CLI worker with real Git/test workflow",
+    "no publication before authenticated approval",
+    "dispatcher publication after approval"
+  ],
+  "live_providers": false,
+  "dependency_environment": "isolated wheel installation with existing runtime dependencies made available via site-packages; no fresh network dependency download"
+}

@@ -1,0 +1,17 @@
+{
+  "access": "maintainers",
+  "require_validation": true,
+  "ready_label": "co4:ready",
+  "excluded_labels": [
+    "security",
+    "co4:hold"
+  ],
+  "maintainer_labels": [
+    "breaking-change"
+  ],
+  "max_task_tokens": 100000,
+  "require_maintainer_approval": true,
+  "test_profile": "default",
+  "prompt_notes": "Limit changes to the validated maintenance request. Define an observable behavior or compatibility test that fails before the requested correction. Do not manufacture a red assertion for purely cosmetic changes; block and request a testable contract instead.",
+  "strategy": "priority_age"
+}

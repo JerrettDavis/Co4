@@ -1,0 +1,26 @@
+services:
+  co4:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      CO4_DATABASE_URL: sqlite:////data/co4.db
+      GITHUB_APP_PRIVATE_KEY_PATH: /run/secrets/github_app_key
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - co4-data:/data
+    secrets:
+      - github_app_key
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+secrets:
+  github_app_key:
+    file: ./.secrets/github-app.pem
+volumes:
+  co4-data:

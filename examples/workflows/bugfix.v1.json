@@ -1,0 +1,17 @@
+{
+  "access": "verified",
+  "require_validation": true,
+  "ready_label": "co4:ready",
+  "excluded_labels": [
+    "security",
+    "co4:hold"
+  ],
+  "maintainer_labels": [
+    "breaking-change"
+  ],
+  "max_task_tokens": 100000,
+  "require_maintainer_approval": false,
+  "test_profile": "default",
+  "prompt_notes": "Reproduce the reported behavior, document the expected behavior and non-goals, add a regression that fails for that behavior, then make the smallest defensible fix. Preserve existing public contracts unless the issue explicitly changes them.",
+  "strategy": "priority_age"
+}
