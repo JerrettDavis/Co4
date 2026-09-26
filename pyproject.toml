@@ -33,7 +33,7 @@ Changelog = "https://github.com/JerrettDavis/Co4/releases"
 
 [project.optional-dependencies]
 postgres = ["psycopg[binary]>=3.2,<4"]
-test = ["pytest==9.0.2", "pytest-bdd>=8.1,<9", "playwright>=1.50,<2"]
+test = ["pytest==9.0.2", "pytest-bdd>=8.1,<9", "playwright>=1.50,<2", "pytest-cov>=5.0,<6"]
 [project.scripts]
 co4 = "co4.cli:main"
 [tool.setuptools.packages.find]
