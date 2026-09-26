@@ -18,6 +18,7 @@ build/
 .test-*
 .browser-*
 /worker.toml
+/worker-*.toml
 coverage.xml
 htmlcov/
 .coverage

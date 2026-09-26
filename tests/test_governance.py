@@ -74,6 +74,77 @@ def test_one_active_allocation_per_person_across_devices(app, clients):
     assert poll(w1)['lease']['id'] == first['lease']['id']
 
 
+def test_orphaned_lease_from_a_dead_device_does_not_deadlock_a_replacement_device(app, clients):
+    # Simulates a re-enrolled harness: the old worker process died mid-task holding the person's
+    # one allowed active lease, and a fresh device row for the same harness is now polling.
+    dead, dead_info = device_client(app, clients['maintainer'], harness='claude')
+    stuck = poll(dead)
+    assert stuck['lease'] is not None and stuck['lease']['state'] == 'running'
+    with app.state.db.transaction() as s:
+        lease = s.get(Lease, stuck['lease']['id'])
+        lease.last_contact -= app.state.settings.orphan_seconds + 1  # No heartbeat past the grace period.
+    live, live_info = device_client(app, clients['maintainer'], harness='claude')
+    assert live_info['id'] != dead_info['id']
+    job = poll(live)
+    assert job['lease'] is not None
+    assert job['lease']['device_id'] == live_info['id']
+    with app.state.db.read() as s:
+        old = s.get(Lease, stuck['lease']['id'])
+        assert old.state == 'reclaimed'
+        assert s.get(Work, old.work_id).active_lease == job['lease']['id']
+
+
+def test_awaiting_review_lease_is_never_auto_reclaimed_by_a_sibling_poll(app, clients):
+    # A device stops heartbeating a lease the instant /complete succeeds -- by design it goes back to
+    # polling for new work, never touching this lease again. `last_contact` freezes forever at that
+    # moment, so it must never be mistaken for a dead device by the orphan-reclaim path: that would
+    # silently discard a finished, passing, awaiting-human-review contribution and abandon its branch.
+    worker, info = device_client(app, clients['maintainer'])
+    job = poll(worker)
+    lease, work = job['lease'], job['work']
+    for phase in ['baseline', 'spec', 'red', 'green', 'verify', 'ready']:
+        heartbeat = worker.post(f"/api/worker/leases/{lease['id']}/heartbeat",
+            json={'generation': lease['generation'], 'phase': phase})
+        assert heartbeat.status_code == 200, heartbeat.text
+    payload = {
+        'generation': lease['generation'],
+        'checkpoint': {'repository': 'co4-demo/tiny-library',
+            'branch': f"co4/work/{work['number']}/{lease['id']}", 'sha': 'a' * 40},
+        'evidence': {'baseline_exit': 0, 'red_exit': 1, 'green_exit': 0, 'verify_exit': 0,
+            'spec_sha256': 'b' * 64, 'behavior_sha256': 'c' * 64, 'tests_sha256': 'd' * 64,
+            'profile': 'default', 'baseline_commit': 'e' * 40, 'red_commit': 'f' * 40, 'green_commit': 'a' * 40},
+        'usage': {'complete': True, 'input_tokens': 10, 'output_tokens': 5, 'source': 'fixture'},
+        'summary': 'Fixed the thing.', 'diff': 'diff --git a/x b/x\n+1\n',
+    }
+    response = worker.post(f"/api/worker/leases/{lease['id']}/complete", json=payload)
+    assert response.status_code == 200, response.text
+    assert response.json()['state'] == 'awaiting_review'
+    with app.state.db.transaction() as s:
+        stuck = s.get(Lease, lease['id'])
+        # The device never heartbeats again after /complete; simulate well past the grace period.
+        stuck.last_contact -= app.state.settings.orphan_seconds + 1
+    sibling, sibling_info = device_client(app, clients['maintainer'])
+    assert sibling_info['id'] != info['id']
+    assert poll(sibling)['lease'] is None  # Still blocked -- not reclaimed, not requeued.
+    with app.state.db.read() as s:
+        current = s.get(Lease, lease['id'])
+        assert current.state == 'awaiting_review'
+        assert s.get(Work, current.work_id).active_lease == current.id
+
+
+def test_a_lease_that_is_merely_busy_is_not_reclaimed_from_a_sibling_device(app, clients):
+    # Without an elapsed heartbeat gap, the second device stays blocked -- this is not a liveness bug,
+    # it is the deliberate one-active-lease-per-person rule, and must not be weakened by the orphan fix.
+    w1, info1 = device_client(app, clients['maintainer'])
+    w2, _ = device_client(app, clients['maintainer'])
+    first = poll(w1)
+    assert first['lease'] is not None
+    second = poll(w2)
+    assert second['lease'] is None
+    with app.state.db.read() as s:
+        assert s.get(Lease, first['lease']['id']).state == 'running'
+
+
 def test_budget_reservation_and_unknown_usage_conservative_accounting(app, clients):
     with app.state.db.transaction() as s:
         p = s.scalar(select(Project)); p.budget_tokens = 100_000
