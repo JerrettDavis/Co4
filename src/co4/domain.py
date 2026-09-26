@@ -106,6 +106,16 @@ class Coordinator:
         status(s, w, f"Work allocated. Execution mode: {device.autonomy}. Human approval is required before a draft PR is created.")
         return lease
 
+    def orphaned(self, lease: Lease) -> bool:
+        # Scoped to `running` only. Unlike STALEABLE (used by the unrelated 12-hour cross-user dib
+        # flow), this is a same-user, same-heartbeat-cadence liveness check, and heartbeat cadence is
+        # only a meaningful liveness signal while a device is actively executing. `blocked` already has
+        # its own no-time-pressure recovery path (`recover()`); `awaiting_review` is entered once,
+        # deliberately, after a device stops heartbeating by design (see `complete()`), and must only
+        # ever be resolved by a human review action, never auto-reclaimed by a sibling device's routine
+        # poll within the grace period.
+        return lease.state == "running" and self.clock() - lease.last_contact >= self.settings.orphan_seconds
+
     def poll(self, s, device: Device, repositories: list[str]) -> Lease | None:
         device.last_seen = self.clock()
         if not device.enabled:
@@ -113,8 +123,21 @@ class Coordinator:
         current = s.scalar(select(Lease).where(Lease.device_id == device.id, Lease.state.in_(ACTIVE)))
         if current:
             return current
-        if s.scalar(select(Lease).where(Lease.user_id == device.user_id, Lease.state.in_(ACTIVE))):
-            return None
+        blocking = s.scalar(select(Lease).where(Lease.user_id == device.user_id, Lease.state.in_(ACTIVE)))
+        if blocking:
+            # `blocking.device_id` cannot equal `device.id` here (that case is `current`, above), so this
+            # lease belongs to a different device row of the same person. This device is live right now
+            # (it just polled). If the lease holder went silent past a reasonable heartbeat grace period,
+            # it is very likely the device row from a dead/replaced worker process (e.g. re-enrollment
+            # after a crash) rather than a device that is merely mid-task, and it can never check in again.
+            # Reclaim it instead of deadlocking every device this person owns until a human intervenes.
+            if self.orphaned(blocking):
+                w = get(s, Work, blocking.work_id)
+                self.release(s, blocking, terminal="reclaimed")
+                status(s, w, "The previous device went silent past the heartbeat grace period. "
+                              "The allocation was reclaimed so another of your devices is not blocked.")
+            else:
+                return None
         candidates = list(s.scalars(select(Work).where(Work.state == "queued")))
         def score(w):
             policy = Policy(**get(s, Project, w.project_id).policy)
