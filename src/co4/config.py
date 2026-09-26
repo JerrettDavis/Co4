@@ -35,8 +35,8 @@ class Settings:
     webhook_secret: str = field(default_factory=lambda: os.getenv("GITHUB_WEBHOOK_SECRET", ""))
     client_id: str = field(default_factory=lambda: os.getenv("GITHUB_CLIENT_ID", ""))
     client_secret: str = field(default_factory=lambda: os.getenv("GITHUB_CLIENT_SECRET", ""))
-    # Test seams: point the GitHub gateway at a local stand-in (e.g. the browser e2e mock). Non-HTTPS
-    # overrides are only accepted for loopback hosts; see GitHub.__init__.
+    # Test seams: point the GitHub gateway at a local stand-in (e.g. the browser e2e mock).
+    # Non-HTTPS overrides are only accepted for loopback hosts; see GitHub.__init__.
     github_url: str = field(
         default_factory=lambda: os.getenv("CO4_GITHUB_URL", "https://github.com").rstrip("/")
     )
@@ -49,15 +49,16 @@ class Settings:
     secure_cookies: bool = True
     stale_seconds: int = 12 * 3600
     recovery_seconds: int = 12 * 3600
-    # A much shorter, same-user-only grace period. When a person re-enrolls a device for a harness
-    # (their old worker process died and a new device row is polling), their active lease can be
-    # pinned to the dead device row for up to `stale_seconds` (12h) before the cross-user dib flow
-    # even becomes eligible -- and dib explicitly refuses a same-user takeover. That deadlocks every
-    # device belonging to the person until a human manually denies the stuck lease. Once a sibling
-    # device of the same person is confirmed live (it is polling right now), an active lease that has
-    # not heartbeated in this many seconds is presumed abandoned and is self-serviced back to the
-    # queue. Lease fencing (generation tokens) makes this safe even if the "dead" device turns out to
-    # still be alive and tries to check in later; it will simply be fenced out.
+    # A much shorter, same-user-only grace period. When a person re-enrolls a device for a
+    # harness (their old worker process died and a new device row is polling), their active
+    # lease can be pinned to the dead device row for up to `stale_seconds` (12h) before the
+    # cross-user dib flow even becomes eligible -- and dib explicitly refuses a same-user
+    # takeover. That deadlocks every device belonging to the person until a human manually
+    # denies the stuck lease. Once a sibling device of the same person is confirmed live (it
+    # is polling right now), an active lease that has not heartbeated in this many seconds is
+    # presumed abandoned and is self-serviced back to the queue. Lease fencing (generation
+    # tokens) makes this safe even if the "dead" device turns out to still be alive and tries
+    # to check in later; it will simply be fenced out.
     orphan_seconds: int = 300
     event_retention_days: int = 30
 

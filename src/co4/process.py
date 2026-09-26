@@ -53,7 +53,8 @@ def run_process(
     idle_seconds: float = 900,
     tick_seconds: float = 10,
 ) -> ProcessResult:
-    """Bounded streams, whole-process-tree cancellation, idle and absolute watchdogs. No shell=True."""
+    """Bounded streams, whole-process-tree cancellation, idle and absolute watchdogs.
+    No shell=True."""
     started = last_output = last_tick = time.monotonic()
     messages = queue.Queue(maxsize=128)  # type: ignore[var-annotated]  # pre-existing, out of scope for #11
     process = subprocess.Popen(

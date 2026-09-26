@@ -24,7 +24,8 @@ from co4.process import ExecutionStopped, ProcessResult
 def require_terminal(input_fd: int | None = None, output_fd: int | None = None) -> tuple[int, int]:
     if os.name != "posix":
         raise RuntimeError(
-            "Interactive mode requires a POSIX terminal. On Windows, run the worker and harness in WSL. No noninteractive fallback is performed."
+            "Interactive mode requires a POSIX terminal. On Windows, run the worker and "
+            "harness in WSL. No noninteractive fallback is performed."
         )
     try:
         input_fd = sys.stdin.fileno() if input_fd is None else input_fd
@@ -33,7 +34,8 @@ def require_terminal(input_fd: int | None = None, output_fd: int | None = None) 
             raise ValueError("not a tty")
     except (ValueError, AttributeError, OSError) as error:
         raise RuntimeError(
-            "Interactive mode requires an attached terminal on stdin and stdout. Use a terminal, ssh -t, or tmux. No print-mode fallback is performed."
+            "Interactive mode requires an attached terminal on stdin and stdout. Use a "
+            "terminal, ssh -t, or tmux. No print-mode fallback is performed."
         ) from error
     return input_fd, output_fd
 
@@ -211,7 +213,9 @@ def run_interactive_process(
                 try:
                     flush()
                 except Exception:
-                    pass  # Preserve the original stop reason; durable unacked events remain replayable.
+                    # Preserve the original stop reason; durable unacked events remain
+                    # replayable.
+                    pass
         finally:
             try:
                 termios.tcsetattr(input_fd, termios.TCSANOW, saved)
@@ -236,7 +240,8 @@ def confirm_phase(
         _write(
             out,
             (
-                f"\nCo4: {phase} session closed. Type continue to validate this phase, or stop to pause: "
+                f"\nCo4: {phase} session closed. Type continue to validate this phase, or "
+                "stop to pause: "
             ).encode(),
         )
     finally:

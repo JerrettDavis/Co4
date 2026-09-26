@@ -148,8 +148,9 @@ class UsageMeter:
                 self.cached_input_tokens = u.get("cached_input_tokens")
                 self.complete = True
         elif self.harness == "copilot":
-            # CLI JSONL schemas evolve. Preserve every event, accept only explicit terminal counters.
-            # Unknown Copilot telemetry remains null and reserves the conservative quota amount.
+            # CLI JSONL schemas evolve. Preserve every event, accept only explicit terminal
+            # counters. Unknown Copilot telemetry remains null and reserves the conservative
+            # quota amount.
             if kind in {"session.usage", "session.shutdown", "result"}:
                 u = data.get("usage") or (data.get("data") or {}).get("usage") or {}
                 if isinstance(u.get("input_tokens"), int) and isinstance(

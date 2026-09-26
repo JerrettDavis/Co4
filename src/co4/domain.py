@@ -193,18 +193,19 @@ class Coordinator:
         status(
             s,
             w,
-            f"Work allocated. Execution mode: {device.autonomy}. Human approval is required before a draft PR is created.",
+            f"Work allocated. Execution mode: {device.autonomy}. Human approval is required "
+            "before a draft PR is created.",
         )
         return lease
 
     def orphaned(self, lease: Lease) -> bool:
-        # Scoped to `running` only. Unlike STALEABLE (used by the unrelated 12-hour cross-user dib
-        # flow), this is a same-user, same-heartbeat-cadence liveness check, and heartbeat cadence is
-        # only a meaningful liveness signal while a device is actively executing. `blocked` already has
-        # its own no-time-pressure recovery path (`recover()`); `awaiting_review` is entered once,
-        # deliberately, after a device stops heartbeating by design (see `complete()`), and must only
-        # ever be resolved by a human review action, never auto-reclaimed by a sibling device's routine
-        # poll within the grace period.
+        # Scoped to `running` only. Unlike STALEABLE (used by the unrelated 12-hour cross-user
+        # dib flow), this is a same-user, same-heartbeat-cadence liveness check, and heartbeat
+        # cadence is only a meaningful liveness signal while a device is actively executing.
+        # `blocked` already has its own no-time-pressure recovery path (`recover()`);
+        # `awaiting_review` is entered once, deliberately, after a device stops heartbeating by
+        # design (see `complete()`), and must only ever be resolved by a human review action,
+        # never auto-reclaimed by a sibling device's routine poll within the grace period.
         return (
             lease.state == "running"
             and self.clock() - lease.last_contact >= self.settings.orphan_seconds
@@ -223,12 +224,13 @@ class Coordinator:
             select(Lease).where(Lease.user_id == device.user_id, Lease.state.in_(ACTIVE))
         )
         if blocking:
-            # `blocking.device_id` cannot equal `device.id` here (that case is `current`, above), so this
-            # lease belongs to a different device row of the same person. This device is live right now
-            # (it just polled). If the lease holder went silent past a reasonable heartbeat grace period,
-            # it is very likely the device row from a dead/replaced worker process (e.g. re-enrollment
-            # after a crash) rather than a device that is merely mid-task, and it can never check in again.
-            # Reclaim it instead of deadlocking every device this person owns until a human intervenes.
+            # `blocking.device_id` cannot equal `device.id` here (that case is `current`, above),
+            # so this lease belongs to a different device row of the same person. This device
+            # is live right now (it just polled). If the lease holder went silent past a
+            # reasonable heartbeat grace period, it is very likely the device row from a
+            # dead/replaced worker process (e.g. re-enrollment after a crash) rather than a
+            # device that is merely mid-task, and it can never check in again. Reclaim it
+            # instead of deadlocking every device this person owns until a human intervenes.
             if self.orphaned(blocking):
                 w = get(s, Work, blocking.work_id)
                 self.release(s, blocking, terminal="reclaimed")
@@ -333,7 +335,8 @@ class Coordinator:
                 status(
                     s,
                     w,
-                    "The 12-hour recovery window expired. The old lease is fenced out; checkpoint history is preserved.",
+                    "The 12-hour recovery window expired. The old lease is fenced out; "
+                    "checkpoint history is preserved.",
                 )
 
     def stale(self, lease: Lease) -> bool:
@@ -365,7 +368,8 @@ class Coordinator:
         status(
             s,
             w,
-            "Another contributor requested this stale task. The original contributor has 12 hours to explicitly recover it.",
+            "Another contributor requested this stale task. The original contributor has 12 "
+            "hours to explicitly recover it.",
         )
 
     def recover(self, s, lease: Lease, user_id: str):
@@ -393,7 +397,8 @@ class Coordinator:
         if (e.baseline_exit, e.red_exit, e.green_exit, e.verify_exit) != (0, 1, 0, 0):
             fail(
                 422,
-                "Required evidence: passing baseline, failing test, passing implementation, passing verification",
+                "Required evidence: passing baseline, failing test, passing implementation, "
+                "passing verification",
             )
         if e.profile != Policy(**get(s, Project, w.project_id).policy).test_profile:
             fail(409, "Test profile changed; rerun using the current policy")
@@ -432,7 +437,8 @@ class Coordinator:
         status(
             s,
             w,
-            "Implementation and test evidence are ready. No PR has been created. The contributor must review and approve the exact commit.",
+            "Implementation and test evidence are ready. No PR has been created. The "
+            "contributor must review and approve the exact commit.",
         )
 
     def approve(self, s, lease: Lease, user_id: str, payload):
@@ -478,7 +484,8 @@ class Coordinator:
 
 
 def public_receipt(lease: Lease) -> dict:
-    """Strict allowlist. Prompts, paths, device identity and transcript text never enter a PR receipt."""
+    """Strict allowlist. Prompts, paths, device identity and transcript text never enter a PR
+    receipt."""
     u = lease.usage or {}
     lines = (lease.diff or "").splitlines()
     evidence_keys = (
@@ -530,8 +537,9 @@ def pr_body(lease: Lease, number: int) -> str:
     return (
         f"Closes #{number}\n\n## Contribution\n\n{summary}\n\n"
         "## Execution receipt\n\nThe contributor approved this exact commit and review package. "
-        "This is a draft PR, not permission to merge. Usage is reported by the harness, not independently billed. "
-        "Null means unavailable, never free. No prompts or transcripts are included.\n\n"
+        "This is a draft PR, not permission to merge. Usage is reported by the harness, not "
+        "independently billed. Null means unavailable, never free. No prompts or transcripts "
+        "are included.\n\n"
         f"```json\n{__import__('json').dumps(public_receipt(lease), indent=2)}\n```\n\n"
         f"<!-- co4:submission:{lease.id} -->"
     )

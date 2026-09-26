@@ -37,7 +37,9 @@ def seed(db):
             (
                 41,
                 "Handle an empty collection without raising an exception",
-                "The average function should return 0 for an empty list.\n\nGiven an empty collection, when average is called, then it returns 0 rather than dividing by zero.",
+                "The average function should return 0 for an empty list.\n\nGiven an empty "
+                "collection, when average is called, then it returns 0 rather than dividing "
+                "by zero.",
                 ["bug", "good first issue"],
                 "queued",
                 2,
@@ -45,7 +47,8 @@ def seed(db):
             (
                 42,
                 "Accept an iterable when calculating an average",
-                "Support generator input without consuming it twice. Add examples and regression tests.",
+                "Support generator input without consuming it twice. Add examples and "
+                "regression tests.",
                 ["enhancement"],
                 "validation_pending",
                 1,

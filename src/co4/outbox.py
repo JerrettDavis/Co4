@@ -136,5 +136,6 @@ class Dispatcher:
                 status(
                     s,
                     w,
-                    "A human-approved draft PR has been created. Independent CI and maintainer review are still required.",
+                    "A human-approved draft PR has been created. Independent CI and maintainer "
+                    "review are still required.",
                 )

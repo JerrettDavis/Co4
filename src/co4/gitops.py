@@ -53,7 +53,8 @@ class Repository:
                 "AUTHORIZATION: basic "
                 + base64.b64encode(("x-access-token:" + access).encode()).decode()
             )
-            # Environment-only Git config; never put credentials in argv, .git/config or remote URLs.
+            # Environment-only Git config; never put credentials in argv, .git/config or
+            # remote URLs.
             env.update(
                 GIT_CONFIG_COUNT="1",
                 GIT_CONFIG_KEY_0="http.https://github.com/.extraheader",
@@ -71,7 +72,8 @@ class Repository:
         if check and result.returncode:
             # stderr can contain user paths and tokens. Keep it local to the encrypted trace.
             raise GitError(
-                f"git {args[0] if args else ''} failed (exit {result.returncode}): {result.stderr[-1500:]}"
+                f"git {args[0] if args else ''} failed (exit {result.returncode}): "
+                f"{result.stderr[-1500:]}"
             )
         return result.stdout.rstrip("\n")
 
@@ -106,7 +108,8 @@ class Repository:
             cwd=self.path.parent,
         )
         self.command("checkout", "-b", branch)
-        # Worktrees preserve replayable handover history but start fresh evidence on upstream baseline.
+        # Worktrees preserve replayable handover history but start fresh evidence on upstream
+        # baseline.
         if handover and not self.demo:
             repo, sha = handover["repository"], handover["sha"]
             if not REPO_PATTERN.fullmatch(repo) or not re.fullmatch(r"[a-f0-9]{40}", sha):
@@ -132,7 +135,8 @@ class Repository:
         current = self.command("branch", "--show-current")
         if current != branch:
             raise GitError("Harness changed the work branch; refusing to commit or push")
-        # Keep credentials, hooks, symlinks and generated binaries out of auto-checkpoint publication.
+        # Keep credentials, hooks, symlinks and generated binaries out of auto-checkpoint
+        # publication.
         paths = self.command("status", "--porcelain=v1", "-z", "--untracked-files=all").split("\0")
         for item in paths:
             if not item:

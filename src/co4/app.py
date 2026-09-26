@@ -242,7 +242,11 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
                 "X-Frame-Options": "DENY",
                 "Referrer-Policy": "same-origin",
                 "Cache-Control": "no-store",
-                "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self' https://github.com",
+                "Content-Security-Policy": (
+                    "default-src 'self'; script-src 'self'; style-src 'self'; "
+                    "img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; "
+                    "base-uri 'self'; form-action 'self' https://github.com"
+                ),
             }
         )
         return response
@@ -479,22 +483,36 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
         import html as html_mod
 
         safe_code = html_mod.escape(code)
-        body = f"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>Co4 · Device sign-in</title>
-<style>body{{font-family:system-ui,sans-serif;max-width:560px;margin:3rem auto;padding:0 1rem;color:#123e54}}
-code{{font-family:ui-monospace,Menlo,monospace;background:#f3f6f8;padding:.15rem .4rem;border-radius:4px}}
-.btn{{display:inline-block;padding:.6rem 1rem;background:#123e54;color:#fff;border:0;border-radius:6px;font:inherit;cursor:pointer;text-decoration:none}}
-.muted{{color:#5a6e7e}}
-#user_code{{font-size:2.5rem;letter-spacing:.15em;background:#f3f6f8;padding:1rem;border-radius:8px;text-align:center;font-weight:bold}}
-</style></head>
-<body>
-<h1>Sign in with GitHub device flow</h1>
-<p>1. Open <a href="https://github.com/login/device" target="_blank" rel="noopener">https://github.com/login/device</a> in any browser and sign in to GitHub.</p>
-<p>2. Enter this code when prompted:</p>
-<p id="user_code">{safe_code or "—"}</p>
-<p class="muted">The Co4 app polls GitHub automatically while you complete authorization. This page is a fallback view of the code.</p>
-<p><a class="btn" href="https://github.com/login/device" target="_blank" rel="noopener">Open GitHub device page</a></p>
-</body></html>"""
+        # Built from adjacent string literals (rather than one long triple-quoted block) so
+        # each source line stays under the line-length limit without adding any whitespace
+        # to the rendered HTML.
+        body = (
+            "<!doctype html>\n"
+            '<html lang="en"><head><meta charset="utf-8">'
+            "<title>Co4 · Device sign-in</title>\n"
+            "<style>body{font-family:system-ui,sans-serif;max-width:560px;margin:3rem auto;"
+            "padding:0 1rem;color:#123e54}\n"
+            "code{font-family:ui-monospace,Menlo,monospace;background:#f3f6f8;"
+            "padding:.15rem .4rem;border-radius:4px}\n"
+            ".btn{display:inline-block;padding:.6rem 1rem;background:#123e54;color:#fff;"
+            "border:0;border-radius:6px;font:inherit;cursor:pointer;text-decoration:none}\n"
+            ".muted{color:#5a6e7e}\n"
+            "#user_code{font-size:2.5rem;letter-spacing:.15em;background:#f3f6f8;"
+            "padding:1rem;border-radius:8px;text-align:center;font-weight:bold}\n"
+            "</style></head>\n"
+            "<body>\n"
+            "<h1>Sign in with GitHub device flow</h1>\n"
+            '<p>1. Open <a href="https://github.com/login/device" target="_blank" '
+            'rel="noopener">https://github.com/login/device</a> in any browser and sign in '
+            "to GitHub.</p>\n"
+            "<p>2. Enter this code when prompted:</p>\n"
+            f'<p id="user_code">{safe_code or "—"}</p>\n'
+            '<p class="muted">The Co4 app polls GitHub automatically while you complete '
+            "authorization. This page is a fallback view of the code.</p>\n"
+            '<p><a class="btn" href="https://github.com/login/device" target="_blank" '
+            'rel="noopener">Open GitHub device page</a></p>\n'
+            "</body></html>"
+        )
         return HTMLResponse(body)
 
     @app.post("/auth/logout")
@@ -618,7 +636,8 @@ code{{font-family:ui-monospace,Menlo,monospace;background:#f3f6f8;padding:.15rem
                     status(
                         s,
                         w,
-                        "Project policy changed. The old allocation is revoked; revalidation is required.",
+                        "Project policy changed. The old allocation is revoked; revalidation "
+                        "is required.",
                     )
             audit(s, p.id, u.id, "project.policy_updated")
             return project_data(p)
@@ -844,7 +863,8 @@ code{{font-family:ui-monospace,Menlo,monospace;background:#f3f6f8;padding:.15rem
             status(
                 s,
                 w,
-                "The contributor declined or released this task. It will not be offered to them again.",
+                "The contributor declined or released this task. It will not be offered to "
+                "them again.",
             )
             return {"state": lease.state}
 
@@ -951,7 +971,8 @@ code{{font-family:ui-monospace,Menlo,monospace;background:#f3f6f8;padding:.15rem
                 status(
                     s,
                     w,
-                    f"Current workflow stage: **{lease.phase}**. Checkpoints are pushed by the contributor device; no PR exists before approval.",
+                    f"Current workflow stage: **{lease.phase}**. Checkpoints are pushed by the "
+                    "contributor device; no PR exists before approval.",
                 )
             return {"state": lease.state, "stop": lease.state != "running"}
 
@@ -1030,7 +1051,8 @@ code{{font-family:ui-monospace,Menlo,monospace;background:#f3f6f8;padding:.15rem
             status(
                 s,
                 w,
-                "Execution stopped and requires contributor attention. Private diagnostics are available in Co4. No PR was created.",
+                "Execution stopped and requires contributor attention. Private diagnostics are "
+                "available in Co4. No PR was created.",
             )
             return {"state": "blocked"}
 
@@ -1192,7 +1214,8 @@ code{{font-family:ui-monospace,Menlo,monospace;background:#f3f6f8;padding:.15rem
                                     status(
                                         s,
                                         w,
-                                        "Request validated from GitHub. It is eligible for matching.",
+                                        "Request validated from GitHub. It is eligible for "
+                                        "matching.",
                                     )
                             elif w.active_lease and parts[1] == "recover":
                                 coordinator.recover(s, get(s, Lease, w.active_lease), identity.id)
@@ -1229,7 +1252,9 @@ code{{font-family:ui-monospace,Menlo,monospace;background:#f3f6f8;padding:.15rem
                             status(
                                 s,
                                 w,
-                                "The PR head changed after approval. The previous execution receipt no longer attests to the PR head; a fresh review is required.",
+                                "The PR head changed after approval. The previous execution "
+                                "receipt no longer attests to the PR head; a fresh review is "
+                                "required.",
                             )
                         elif action == "closed":
                             lease.state = "merged" if pr.get("merged") else "closed"

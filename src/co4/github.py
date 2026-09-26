@@ -81,7 +81,8 @@ class GitHub:
         scope example: "read:user user:email"
         Returns the parsed JSON dict from GitHub.
         Uses form-encoded data. Accept: application/json header.
-        Tries WITHOUT client_secret first; if GitHub returns invalid_client, retries WITH client_secret.
+        Tries WITHOUT client_secret first; if GitHub returns invalid_client, retries WITH
+        client_secret.
         Raises GitHubError on failure. Scrub error messages (no tokens, no body).
         """
         base = {"client_id": self.settings.client_id, "scope": scope}
@@ -101,7 +102,8 @@ class GitHub:
 
     def poll_device_token(self, device_code: str) -> dict:
         """Poll GitHub for an access_token.
-        POSTs to https://github.com/login/oauth/access_token with grant_type=urn:ietf:params:oauth:grant-type:device_code.
+        POSTs to https://github.com/login/oauth/access_token with
+        grant_type=urn:ietf:params:oauth:grant-type:device_code.
         Returns a dict. Possible keys:
           {"status": "authorized", "access_token": str}
           {"status": "slow_down", "interval": int}
