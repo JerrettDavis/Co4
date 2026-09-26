@@ -1,24 +1,32 @@
 from __future__ import annotations
+
 from contextlib import contextmanager
+
 from sqlalchemy import create_engine, event, update
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
+
 from co4.models import Base, Mutex
+
 
 class Database:
     def __init__(self, url: str):
         args = {"pool_pre_ping": True}
         if url.startswith("sqlite"):
-            args["connect_args"] = {"check_same_thread": False, "timeout": 30}
+            # mypy infers `args: dict[str, bool]` from the first entry, so the heterogeneous
+            # values assigned below don't match. Pre-existing, out of scope for #11.
+            args["connect_args"] = {"check_same_thread": False, "timeout": 30}  # type: ignore[assignment]
             if ":memory:" in url:
-                args["poolclass"] = StaticPool
+                args["poolclass"] = StaticPool  # type: ignore[assignment]
         self.engine = create_engine(url, **args)
         if url.startswith("sqlite"):
+
             @event.listens_for(self.engine, "connect")
             def configure(connection, _):
                 connection.execute("PRAGMA foreign_keys=ON")
                 connection.execute("PRAGMA busy_timeout=30000")
                 connection.execute("PRAGMA journal_mode=WAL")
+
         Base.metadata.create_all(self.engine)
         self.sessions = sessionmaker(self.engine, expire_on_commit=False)
         # Schema creation is an explicit deployment step in multi-replica production.

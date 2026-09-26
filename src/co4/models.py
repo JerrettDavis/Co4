@@ -1,19 +1,25 @@
 from __future__ import annotations
+
 import time
 import uuid
-from sqlalchemy import Boolean, Float, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
+
+from sqlalchemy import JSON, Boolean, Float, ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
 
 def uid() -> str:
     return uuid.uuid4().hex
 
+
 class Base(DeclarativeBase):
     pass
+
 
 class Mutex(Base):
     __tablename__ = "mutex"
     id: Mapped[int] = mapped_column(primary_key=True)
     version: Mapped[int] = mapped_column(default=0)
+
 
 class User(Base):
     __tablename__ = "users"
@@ -22,6 +28,7 @@ class User(Base):
     login: Mapped[str] = mapped_column(String(100), unique=True)
     created: Mapped[float] = mapped_column(default=time.time)
 
+
 class Session(Base):
     __tablename__ = "sessions"
     token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -29,10 +36,12 @@ class Session(Base):
     github_token: Mapped[str] = mapped_column(Text, default="")
     expires: Mapped[float] = mapped_column()
 
+
 class OAuthState(Base):
     __tablename__ = "oauth_states"
     state_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
     expires: Mapped[float] = mapped_column()
+
 
 class Project(Base):
     __tablename__ = "projects"
@@ -50,6 +59,7 @@ class Project(Base):
     reserved_tokens: Mapped[int] = mapped_column(default=0)
     created: Mapped[float] = mapped_column(default=time.time)
 
+
 class Member(Base):
     __tablename__ = "members"
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), primary_key=True)
@@ -58,6 +68,7 @@ class Member(Base):
     verified: Mapped[bool] = mapped_column(Boolean, default=False)
     watching: Mapped[bool] = mapped_column(Boolean, default=True)
     quality: Mapped[int] = mapped_column(default=0)
+
 
 class Device(Base):
     __tablename__ = "devices"
@@ -71,6 +82,7 @@ class Device(Base):
     max_tokens: Mapped[int] = mapped_column(default=100_000)
     labels: Mapped[list] = mapped_column(JSON, default=list)
     last_seen: Mapped[float] = mapped_column(default=0)
+
 
 class Work(Base):
     __tablename__ = "work"
@@ -88,6 +100,7 @@ class Work(Base):
     checkpoint: Mapped[dict] = mapped_column(JSON, default=dict)
     created: Mapped[float] = mapped_column(default=time.time)
     updated: Mapped[float] = mapped_column(default=time.time)
+
 
 class Lease(Base):
     __tablename__ = "leases"
@@ -116,10 +129,12 @@ class Lease(Base):
     pr_url: Mapped[str] = mapped_column(String(500), default="")
     error: Mapped[str] = mapped_column(Text, default="")
 
+
 class Decline(Base):
     __tablename__ = "declines"
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), primary_key=True)
     work_id: Mapped[str] = mapped_column(ForeignKey("work.id"), primary_key=True)
+
 
 class Event(Base):
     __tablename__ = "events"
@@ -131,6 +146,7 @@ class Event(Base):
     payload: Mapped[str] = mapped_column(Text)
     created: Mapped[float] = mapped_column(default=time.time)
 
+
 class Audit(Base):
     __tablename__ = "audit"
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=uid)
@@ -140,10 +156,12 @@ class Audit(Base):
     detail: Mapped[dict] = mapped_column(JSON, default=dict)
     created: Mapped[float] = mapped_column(default=time.time)
 
+
 class Delivery(Base):
     __tablename__ = "deliveries"
     id: Mapped[str] = mapped_column(String(100), primary_key=True)
     created: Mapped[float] = mapped_column(default=time.time)
+
 
 class Outbox(Base):
     __tablename__ = "outbox"
@@ -158,6 +176,7 @@ class Outbox(Base):
     locked_until: Mapped[float] = mapped_column(default=0)
     lock_token: Mapped[str] = mapped_column(String(32), default="")
     error: Mapped[str] = mapped_column(Text, default="")
+
 
 class DeviceFlow(Base):
     __tablename__ = "device_flow"

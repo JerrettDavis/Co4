@@ -1,11 +1,14 @@
 from __future__ import annotations
+
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
+
 from cryptography.fernet import Fernet
 
 LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
 
 def is_loopback_url(url: str) -> bool:
     try:
@@ -13,22 +16,35 @@ def is_loopback_url(url: str) -> bool:
     except ValueError:
         return False
 
+
 @dataclass
 class Settings:
-    database_url: str = field(default_factory=lambda: os.getenv("CO4_DATABASE_URL", "sqlite:///./co4.db"))
-    public_url: str = field(default_factory=lambda: os.getenv("CO4_PUBLIC_URL", "http://localhost:8080").rstrip("/"))
+    database_url: str = field(
+        default_factory=lambda: os.getenv("CO4_DATABASE_URL", "sqlite:///./co4.db")
+    )
+    public_url: str = field(
+        default_factory=lambda: os.getenv("CO4_PUBLIC_URL", "http://localhost:8080").rstrip("/")
+    )
     demo: bool = field(default_factory=lambda: os.getenv("CO4_DEMO", "false").lower() == "true")
     data_key: str = field(default_factory=lambda: os.getenv("CO4_DATA_KEY", ""))
     app_id: str = field(default_factory=lambda: os.getenv("GITHUB_APP_ID", ""))
     app_slug: str = field(default_factory=lambda: os.getenv("GITHUB_APP_SLUG", ""))
-    private_key_path: str = field(default_factory=lambda: os.getenv("GITHUB_APP_PRIVATE_KEY_PATH", ""))
+    private_key_path: str = field(
+        default_factory=lambda: os.getenv("GITHUB_APP_PRIVATE_KEY_PATH", "")
+    )
     webhook_secret: str = field(default_factory=lambda: os.getenv("GITHUB_WEBHOOK_SECRET", ""))
     client_id: str = field(default_factory=lambda: os.getenv("GITHUB_CLIENT_ID", ""))
     client_secret: str = field(default_factory=lambda: os.getenv("GITHUB_CLIENT_SECRET", ""))
     # Test seams: point the GitHub gateway at a local stand-in (e.g. the browser e2e mock). Non-HTTPS
     # overrides are only accepted for loopback hosts; see GitHub.__init__.
-    github_url: str = field(default_factory=lambda: os.getenv("CO4_GITHUB_URL", "https://github.com").rstrip("/"))
-    github_api_url: str = field(default_factory=lambda: os.getenv("CO4_GITHUB_API_URL", "https://api.github.com").rstrip("/"))
+    github_url: str = field(
+        default_factory=lambda: os.getenv("CO4_GITHUB_URL", "https://github.com").rstrip("/")
+    )
+    github_api_url: str = field(
+        default_factory=lambda: os.getenv("CO4_GITHUB_API_URL", "https://api.github.com").rstrip(
+            "/"
+        )
+    )
     background: bool = True
     secure_cookies: bool = True
     stale_seconds: int = 12 * 3600
@@ -52,11 +68,19 @@ class Settings:
                 # Stable demo-only key. No real integrations or secrets permitted in demo.
                 self.data_key = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
             return
-        missing = [k for k, v in {
-            "CO4_DATA_KEY": self.data_key, "GITHUB_APP_ID": self.app_id,
-            "GITHUB_APP_SLUG": self.app_slug, "GITHUB_APP_PRIVATE_KEY_PATH": self.private_key_path,
-            "GITHUB_WEBHOOK_SECRET": self.webhook_secret, "GITHUB_CLIENT_ID": self.client_id,
-            "GITHUB_CLIENT_SECRET": self.client_secret}.items() if not v]
+        missing = [
+            k
+            for k, v in {
+                "CO4_DATA_KEY": self.data_key,
+                "GITHUB_APP_ID": self.app_id,
+                "GITHUB_APP_SLUG": self.app_slug,
+                "GITHUB_APP_PRIVATE_KEY_PATH": self.private_key_path,
+                "GITHUB_WEBHOOK_SECRET": self.webhook_secret,
+                "GITHUB_CLIENT_ID": self.client_id,
+                "GITHUB_CLIENT_SECRET": self.client_secret,
+            }.items()
+            if not v
+        ]
         if missing:
             raise ValueError("Missing production settings: " + ", ".join(missing))
         if not self.public_url.startswith("https://"):

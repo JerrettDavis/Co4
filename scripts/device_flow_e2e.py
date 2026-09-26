@@ -17,12 +17,13 @@ signed out with a visible error.
 
 Usage:  python scripts/device_flow_e2e.py [--output DIR] [--headed]
 """
+
 from __future__ import annotations
+
 import argparse
 import html
 import json
 import os
-from pathlib import Path
 import secrets
 import socket
 import subprocess
@@ -30,9 +31,10 @@ import sys
 import tempfile
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
 import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 from playwright.sync_api import expect, sync_playwright
 
@@ -45,11 +47,12 @@ GITHUB_ID = 424242
 # Local GitHub stand-in
 # --------------------------------------------------------------------------------------------
 
+
 class FakeGitHub:
     def __init__(self):
         self.lock = threading.Lock()
-        self.codes: dict[str, dict] = {}   # device_code -> {"user_code", "status"}
-        self.tokens: dict[str, str] = {}   # access token -> login
+        self.codes: dict[str, dict] = {}  # device_code -> {"user_code", "status"}
+        self.tokens: dict[str, str] = {}  # access token -> login
         self.polls = 0
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
@@ -90,19 +93,29 @@ class FakeGitHub:
                 self.wfile.write(data)
 
             def _page(self, title, body, status=200):
-                self._send(status, f"<!doctype html><title>{title}</title><h1>{title}</h1>{body}", "text/html")
+                self._send(
+                    status,
+                    f"<!doctype html><title>{title}</title><h1>{title}</h1>{body}",
+                    "text/html",
+                )
 
             def do_GET(self):
                 path = urlparse(self.path).path
                 if path == "/login/device":
-                    return self._page("Device activation", (
-                        '<form method="post" action="/login/device">'
-                        '<label for="user_code">Enter the code displayed on your device</label>'
-                        '<input id="user_code" name="user_code" autocomplete="off">'
-                        '<button name="decision" value="authorize">Authorize co4</button>'
-                        '<button name="decision" value="deny">Cancel</button></form>'))
+                    return self._page(
+                        "Device activation",
+                        (
+                            '<form method="post" action="/login/device">'
+                            '<label for="user_code">Enter the code displayed on your device</label>'
+                            '<input id="user_code" name="user_code" autocomplete="off">'
+                            '<button name="decision" value="authorize">Authorize co4</button>'
+                            '<button name="decision" value="deny">Cancel</button></form>'
+                        ),
+                    )
                 if path == "/user":
-                    login = fake.tokens.get(self.headers.get("Authorization", "").removeprefix("Bearer "))
+                    login = fake.tokens.get(
+                        self.headers.get("Authorization", "").removeprefix("Bearer ")
+                    )
                     if not login:
                         return self._send(401, {"message": "Bad credentials"})
                     return self._send(200, {"id": GITHUB_ID, "login": login})
@@ -118,9 +131,16 @@ class FakeGitHub:
                     user_code = f"{secrets.token_hex(2).upper()}-{secrets.token_hex(2).upper()}"
                     with fake.lock:
                         fake.codes[device_code] = {"user_code": user_code, "status": "pending"}
-                    return self._send(200, {"device_code": device_code, "user_code": user_code,
-                                            "verification_uri": fake.url + "/login/device",
-                                            "expires_in": 900, "interval": 1})
+                    return self._send(
+                        200,
+                        {
+                            "device_code": device_code,
+                            "user_code": user_code,
+                            "verification_uri": fake.url + "/login/device",
+                            "expires_in": 900,
+                            "interval": 1,
+                        },
+                    )
                 if path == "/login/oauth/access_token":
                     if form.get("grant_type") != "urn:ietf:params:oauth:grant-type:device_code":
                         return self._send(200, {"error": "unsupported_grant_type"})
@@ -134,17 +154,30 @@ class FakeGitHub:
                             code["status"] = "redeemed"
                             access = "gho_" + secrets.token_hex(16)
                             fake.tokens[access] = GITHUB_LOGIN
-                            return self._send(200, {"access_token": access, "token_type": "bearer", "scope": "read:user"})
-                    error = {"pending": "authorization_pending", "denied": "access_denied",
-                             "expired": "expired_token", "redeemed": "bad_verification_code"}[status]
+                            return self._send(
+                                200,
+                                {
+                                    "access_token": access,
+                                    "token_type": "bearer",
+                                    "scope": "read:user",
+                                },
+                            )
+                    error = {
+                        "pending": "authorization_pending",
+                        "denied": "access_denied",
+                        "expired": "expired_token",
+                        "redeemed": "bad_verification_code",
+                    }[status]
                     return self._send(200, {"error": error})
                 if path == "/login/device":
                     status = "approved" if form.get("decision") == "authorize" else "denied"
                     if not fake.set_status(form.get("user_code", ""), status):
                         return self._page("Unknown code", "<p>That code is not valid.</p>", 404)
                     if status == "approved":
-                        return self._page("Congratulations, you're all set!",
-                                          f"<p>Your device is now connected as {html.escape(GITHUB_LOGIN)}.</p>")
+                        return self._page(
+                            "Congratulations, you're all set!",
+                            f"<p>Your device is now connected as {html.escape(GITHUB_LOGIN)}.</p>",
+                        )
                     return self._page("Access denied", "<p>You cancelled the authorization.</p>")
                 self._send(404, {"message": "Not Found"})
 
@@ -155,6 +188,7 @@ class FakeGitHub:
 # Co4 server process
 # --------------------------------------------------------------------------------------------
 
+
 def free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -163,22 +197,32 @@ def free_port() -> int:
 
 def start_co4(github: FakeGitHub, workdir: Path):
     from cryptography.fernet import Fernet
+
     port = free_port()
     key = workdir / "app-private-key.pem"
     key.write_text("not used by device-flow sign-in")
-    env = {**os.environ,
-           "CO4_PUBLIC_URL": f"http://127.0.0.1:{port}",
-           "CO4_DATABASE_URL": "sqlite:///" + (workdir / "co4-e2e.db").as_posix(),
-           "CO4_DATA_KEY": Fernet.generate_key().decode(),
-           "GITHUB_APP_ID": "1", "GITHUB_APP_SLUG": "co4-e2e",
-           "GITHUB_APP_PRIVATE_KEY_PATH": str(key),
-           "GITHUB_WEBHOOK_SECRET": secrets.token_hex(32),
-           "GITHUB_CLIENT_ID": CLIENT_ID, "GITHUB_CLIENT_SECRET": secrets.token_hex(20),
-           "CO4_GITHUB_URL": github.url, "CO4_GITHUB_API_URL": github.url}
+    env = {
+        **os.environ,
+        "CO4_PUBLIC_URL": f"http://127.0.0.1:{port}",
+        "CO4_DATABASE_URL": "sqlite:///" + (workdir / "co4-e2e.db").as_posix(),
+        "CO4_DATA_KEY": Fernet.generate_key().decode(),
+        "GITHUB_APP_ID": "1",
+        "GITHUB_APP_SLUG": "co4-e2e",
+        "GITHUB_APP_PRIVATE_KEY_PATH": str(key),
+        "GITHUB_WEBHOOK_SECRET": secrets.token_hex(32),
+        "GITHUB_CLIENT_ID": CLIENT_ID,
+        "GITHUB_CLIENT_SECRET": secrets.token_hex(20),
+        "CO4_GITHUB_URL": github.url,
+        "CO4_GITHUB_API_URL": github.url,
+    }
     env.pop("CO4_DEMO", None)
     log = (workdir / "co4-serve.log").open("w")
-    process = subprocess.Popen([sys.executable, "-m", "co4", "serve", "--host", "127.0.0.1", "--port", str(port)],
-                               env=env, stdout=log, stderr=subprocess.STDOUT)
+    process = subprocess.Popen(
+        [sys.executable, "-m", "co4", "serve", "--host", "127.0.0.1", "--port", str(port)],
+        env=env,
+        stdout=log,
+        stderr=subprocess.STDOUT,
+    )
     base = f"http://127.0.0.1:{port}"
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
@@ -191,14 +235,17 @@ def start_co4(github: FakeGitHub, workdir: Path):
                     raise SystemExit(f"Expected GitHub-connected mode, got {health}")
                 return process, base, log
         except OSError:
-            time.sleep(.3)
+            time.sleep(0.3)
     process.terminate()
-    raise SystemExit("co4 serve did not become healthy:\n" + (workdir / "co4-serve.log").read_text())
+    raise SystemExit(
+        "co4 serve did not become healthy:\n" + (workdir / "co4-serve.log").read_text()
+    )
 
 
 # --------------------------------------------------------------------------------------------
 # Browser scenarios
 # --------------------------------------------------------------------------------------------
+
 
 def open_device_dialog(page, base):
     page.goto(base)
@@ -213,7 +260,7 @@ def open_device_dialog(page, base):
 
 def approve_on_github(context, page, user_code, decision):
     with context.expect_page() as popup_info:
-        page.locator("#dialog a[target=_blank]").click()   # the verification_uri link
+        page.locator("#dialog a[target=_blank]").click()  # the verification_uri link
     github = popup_info.value
     github.wait_for_load_state()
     expect(github.get_by_role("heading", name="Device activation")).to_be_visible()
@@ -240,7 +287,9 @@ def scenario_approved(browser, base, github, shots):
     expect(tab.get_by_role("heading", name="Congratulations, you're all set!")).to_be_visible()
     tab.close()
     # The SPA must transition by itself: no manual reload, dialog closes, dashboard renders.
-    expect(page.get_by_role("heading", name="Build together, deliberately.")).to_be_visible(timeout=15_000)
+    expect(page.get_by_role("heading", name="Build together, deliberately.")).to_be_visible(
+        timeout=15_000
+    )
     expect(page.locator(".workspace")).to_contain_text(f"{GITHUB_LOGIN}'s workspace")
     # Regression guard for the original bug: the token must never be script-visible.
     cookies = session_cookies(context)
@@ -263,10 +312,12 @@ def scenario_approved(browser, base, github, shots):
     expect(page.get_by_role("button", name="Sign in with device flow").first).to_be_visible()
     assert not errors, errors
     context.close()
-    return ["device code dialog shown; no session before approval",
-            "verification page approval turns the SPA into the signed-in dashboard without a reload",
-            "session cookie is HttpOnly, SameSite=Lax, path=/, and absent from document.cookie",
-            "session survives a page reload; sign-out returns to the landing page"]
+    return [
+        "device code dialog shown; no session before approval",
+        "verification page approval turns the SPA into the signed-in dashboard without a reload",
+        "session cookie is HttpOnly, SameSite=Lax, path=/, and absent from document.cookie",
+        "session survives a page reload; sign-out returns to the landing page",
+    ]
 
 
 def scenario_not_approved(browser, base, github, kind, shots):
@@ -286,7 +337,7 @@ def scenario_not_approved(browser, base, github, kind, shots):
     expect(page.locator("#device-poll-status")).to_have_text(message, timeout=15_000)
     if shots:
         page.screenshot(path=str(shots / f"device-flow-{kind}.png"))
-    page.wait_for_timeout(2_500)   # longer than the poll interval: nothing may sign us in later
+    page.wait_for_timeout(2_500)  # longer than the poll interval: nothing may sign us in later
     expect(page.locator("#device-poll-status")).to_have_text(message)
     assert not session_cookies(context), context.cookies()
     boot = page.evaluate("fetch('/api/bootstrap',{credentials:'same-origin'}).then(r=>r.json())")
@@ -314,7 +365,7 @@ def scenario_cancelled(browser, base, github, shots):
     expect(page.locator("#dialog")).not_to_have_attribute("open", "")
     page.wait_for_timeout(300)
     settled = github.polls
-    page.wait_for_timeout(2_500)   # > 2 poll intervals
+    page.wait_for_timeout(2_500)  # > 2 poll intervals
     assert github.polls == settled, f"polling continued after Cancel ({settled} -> {github.polls})"
     assert not session_cookies(context)
     expect(page.get_by_role("button", name="Sign in with device flow").first).to_be_visible()
@@ -351,7 +402,10 @@ def main():
                     browser.close()
         except BaseException:
             log.flush()
-            print("---- co4 serve log ----\n" + (Path(tmp) / "co4-serve.log").read_text(), file=sys.stderr)
+            print(
+                "---- co4 serve log ----\n" + (Path(tmp) / "co4-serve.log").read_text(),
+                file=sys.stderr,
+            )
             raise
         finally:
             process.terminate()
@@ -361,9 +415,15 @@ def main():
                 process.kill()
             log.close()
             github.stop()
-    report = {"mode": "native browser HTTP against `co4 serve` + local GitHub stand-in",
-              "server": base, "github_stand_in": github.url, "token_polls_seen_by_github": github.polls,
-              "checks": checks, "check_count": len(checks), "status": "passed"}
+    report = {
+        "mode": "native browser HTTP against `co4 serve` + local GitHub stand-in",
+        "server": base,
+        "github_stand_in": github.url,
+        "token_polls_seen_by_github": github.polls,
+        "checks": checks,
+        "check_count": len(checks),
+        "status": "passed",
+    }
     if shots:
         (shots / "device-flow-e2e-report.json").write_text(json.dumps(report, indent=2))
     print(json.dumps(report, indent=2))

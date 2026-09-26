@@ -4,14 +4,18 @@ GitHub is replaced at the HTTP boundary with ``httpx.MockTransport`` so the real
 ``co4.github.GitHub`` gateway (form encoding, error-code mapping, /user lookup) runs
 unchanged; only the network hop to github.com is simulated.
 """
+
 from __future__ import annotations
+
 from http.cookies import SimpleCookie
 from urllib.parse import parse_qs
+
 import httpx
 import pytest
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 from pytest_bdd import given, parsers, scenarios, then, when
+
 from co4.app import create_app
 from co4.config import Settings
 from co4.github import GitHub
@@ -25,21 +29,36 @@ class FakeGitHubOAuth:
     """Minimal stand-in for github.com's device-flow endpoints and api.github.com/user."""
 
     def __init__(self):
-        self.codes = {}      # device_code -> {"user_code", "error", "login"}
-        self.tokens = {}     # access_token -> login
-        self.users = {}      # login -> id
+        self.codes = {}  # device_code -> {"user_code", "error", "login"}
+        self.tokens = {}  # access_token -> login
+        self.users = {}  # login -> id
         self.issued = 0
 
     def handle(self, request: httpx.Request) -> httpx.Response:
-        form = {k: v[0] for k, v in parse_qs(request.content.decode()).items()} if request.content else {}
+        form = (
+            {k: v[0] for k, v in parse_qs(request.content.decode()).items()}
+            if request.content
+            else {}
+        )
         if request.url.host == "github.com" and request.url.path == "/login/device/code":
             assert form.get("client_id") == "cid"
             self.issued += 1
             device_code = f"device-{self.issued}"
-            self.codes[device_code] = {"user_code": f"WDJB-{self.issued:04d}", "error": "authorization_pending", "login": None}
-            return httpx.Response(200, json={"device_code": device_code, "user_code": self.codes[device_code]["user_code"],
-                                             "verification_uri": "https://github.com/login/device",
-                                             "expires_in": 900, "interval": 1})
+            self.codes[device_code] = {
+                "user_code": f"WDJB-{self.issued:04d}",
+                "error": "authorization_pending",
+                "login": None,
+            }
+            return httpx.Response(
+                200,
+                json={
+                    "device_code": device_code,
+                    "user_code": self.codes[device_code]["user_code"],
+                    "verification_uri": "https://github.com/login/device",
+                    "expires_in": 900,
+                    "interval": 1,
+                },
+            )
         if request.url.host == "github.com" and request.url.path == "/login/oauth/access_token":
             assert form.get("grant_type") == "urn:ietf:params:oauth:grant-type:device_code"
             code = self.codes.get(form.get("device_code"))
@@ -48,13 +67,20 @@ class FakeGitHubOAuth:
             if code["login"]:
                 access = f"gho_fake_{code['login']}"
                 self.tokens[access] = code["login"]
-                return httpx.Response(200, json={"access_token": access, "token_type": "bearer", "scope": "read:user"})
+                return httpx.Response(
+                    200, json={"access_token": access, "token_type": "bearer", "scope": "read:user"}
+                )
             return httpx.Response(200, json={"error": code["error"]})
         if request.url.host == "api.github.com" and request.url.path == "/user":
-            login = self.tokens.get(request.headers.get("authorization", "").removeprefix("Bearer "))
+            login = self.tokens.get(
+                request.headers.get("authorization", "").removeprefix("Bearer ")
+            )
             if not login:
                 return httpx.Response(401, json={"message": "Bad credentials"})
-            return httpx.Response(200, json={"id": self.users.setdefault(login, 5000 + len(self.users)), "login": login})
+            return httpx.Response(
+                200,
+                json={"id": self.users.setdefault(login, 5000 + len(self.users)), "login": login},
+            )
         return httpx.Response(404, json={"message": "Not Found"})
 
 
@@ -62,11 +88,23 @@ class FakeGitHubOAuth:
 def world(tmp_path):
     key = tmp_path / "app.pem"
     key.write_text("unused by device flow")
-    cfg = Settings(demo=False, database_url=f"sqlite:///{tmp_path}/device-flow.db", background=False,
-                   public_url=PUBLIC_URL, data_key=Fernet.generate_key().decode(), app_id="1", app_slug="co4",
-                   private_key_path=str(key), webhook_secret="w" * 32, client_id="cid", client_secret="csecret")
+    cfg = Settings(
+        demo=False,
+        database_url=f"sqlite:///{tmp_path}/device-flow.db",
+        background=False,
+        public_url=PUBLIC_URL,
+        data_key=Fernet.generate_key().decode(),
+        app_id="1",
+        app_slug="co4",
+        private_key_path=str(key),
+        webhook_secret="w" * 32,
+        client_id="cid",
+        client_secret="csecret",
+    )
     fake = FakeGitHubOAuth()
-    app = create_app(cfg, github=GitHub(cfg, httpx.Client(transport=httpx.MockTransport(fake.handle))))
+    app = create_app(
+        cfg, github=GitHub(cfg, httpx.Client(transport=httpx.MockTransport(fake.handle)))
+    )
     client = TestClient(app, base_url=PUBLIC_URL, headers={"X-Co4-CSRF": "1"})
     state = {"app": app, "fake": fake, "client": client}
     yield state
@@ -101,7 +139,9 @@ def github_reports(world, github_error):
 
 @when("the page polls for the result")
 def page_polls(world):
-    world["poll"] = world["client"].post("/auth/github/device/poll", json={"device_code": world["device_code"]})
+    world["poll"] = world["client"].post(
+        "/auth/github/device/poll", json={"device_code": world["device_code"]}
+    )
     assert world["poll"].status_code == 200, world["poll"].text
 
 
@@ -128,7 +168,9 @@ def signed_in(world, login):
 
 @then("the device code cannot be redeemed a second time")
 def not_reusable(world):
-    again = world["client"].post("/auth/github/device/poll", json={"device_code": world["device_code"]})
+    again = world["client"].post(
+        "/auth/github/device/poll", json={"device_code": world["device_code"]}
+    )
     assert again.status_code == 409
 
 

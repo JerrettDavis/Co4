@@ -1,7 +1,10 @@
 from __future__ import annotations
+
 import time
+
 from fastapi import HTTPException
 from sqlalchemy import select
+
 from co4.models import Audit, Decline, Device, Lease, Member, Outbox, Project, User, Work
 from co4.schemas import Policy
 from co4.security import canonical, digest, redact
@@ -10,8 +13,10 @@ ACTIVE = {"offered", "running", "blocked", "awaiting_review", "dibbed", "publish
 STALEABLE = {"running", "blocked", "awaiting_review"}
 ROLES = {"owner", "maintainer", "triager", "contributor"}
 
+
 def fail(status: int, message: str):
     raise HTTPException(status, message)
+
 
 def get(s, model, key):
     item = s.get(model, key)
@@ -19,37 +24,104 @@ def get(s, model, key):
         fail(404, "Not found")
     return item
 
+
 def member(s, project: Project, user_id: str, roles: set[str] | None = None) -> Member:
     m = s.get(Member, (project.id, user_id))
     if m is None or m.role == "suspended" or (roles and m.role not in roles):
         fail(403, "Project permission required")
     return m
 
+
 def visible(s, project: Project, user_id: str) -> bool:
     m = s.get(Member, (project.id, user_id))
     return (not project.private and (not m or m.role != "suspended")) or bool(m and m.role in ROLES)
 
+
 def project_data(p: Project) -> dict:
-    return {k: getattr(p, k) for k in ("id", "repository", "repository_id", "installation_id", "default_branch", "private", "active", "policy", "budget_tokens", "reserved_tokens", "spent_tokens")}
+    return {
+        k: getattr(p, k)
+        for k in (
+            "id",
+            "repository",
+            "repository_id",
+            "installation_id",
+            "default_branch",
+            "private",
+            "active",
+            "policy",
+            "budget_tokens",
+            "reserved_tokens",
+            "spent_tokens",
+        )
+    }
+
 
 def work_data(w: Work) -> dict:
-    return {k: getattr(w, k) for k in ("id", "project_id", "number", "title", "body", "labels", "priority", "state", "generation", "active_lease", "checkpoint", "created", "updated")}
+    return {
+        k: getattr(w, k)
+        for k in (
+            "id",
+            "project_id",
+            "number",
+            "title",
+            "body",
+            "labels",
+            "priority",
+            "state",
+            "generation",
+            "active_lease",
+            "checkpoint",
+            "created",
+            "updated",
+        )
+    }
+
 
 def lease_data(s, lease: Lease, *, detail: bool = False) -> dict:
-    result = {k: getattr(lease, k) for k in ("id", "work_id", "user_id", "device_id", "generation", "state", "phase", "last_contact", "created", "token_reservation", "usage", "evidence", "checkpoint", "approved_sha", "maintainer_sha", "review_digest", "dib_user", "dib_expires", "pr_url", "error")}
+    result = {
+        k: getattr(lease, k)
+        for k in (
+            "id",
+            "work_id",
+            "user_id",
+            "device_id",
+            "generation",
+            "state",
+            "phase",
+            "last_contact",
+            "created",
+            "token_reservation",
+            "usage",
+            "evidence",
+            "checkpoint",
+            "approved_sha",
+            "maintainer_sha",
+            "review_digest",
+            "dib_user",
+            "dib_expires",
+            "pr_url",
+            "error",
+        )
+    }
     result["contributor"] = get(s, User, lease.user_id).login
     if detail:
         result.update(summary=lease.summary, diff=lease.diff)
     return result
 
+
 def audit(s, project_id: str, actor: str, action: str, **detail):
     s.add(Audit(project_id=project_id, actor=actor, action=action, detail=detail))
+
 
 def status(s, w: Work, text: str):
     # A single status task per work item, replaced with the latest state until delivery.
     key = "status:" + w.id
     job = s.scalar(select(Outbox).where(Outbox.key == key))
-    data = {"work_id": w.id, "number": w.number, "body": f"**Co4 · {w.state.replace('_', ' ')}**\n\n" + text}
+    data = {
+        "work_id": w.id,
+        "number": w.number,
+        "body": f"**Co4 · {w.state.replace('_', ' ')}**\n\n" + text,
+    }
     if not job:
         s.add(Outbox(key=key, project_id=w.project_id, kind="status", payload=data))
     else:
@@ -59,6 +131,7 @@ def status(s, w: Work, text: str):
         # Invalidates a dispatcher claim. Remote side effects are reconciled on next run.
         job.lock_token = ""
         job.locked_until = 0
+
 
 class Coordinator:
     def __init__(self, db, settings, clock=time.time):
@@ -95,15 +168,33 @@ class Coordinator:
             return None
         p.reserved_tokens += amount
         w.generation += 1
-        lease = Lease(work_id=w.id, user_id=device.user_id, device_id=device.id, generation=w.generation,
+        lease = Lease(
+            work_id=w.id,
+            user_id=device.user_id,
+            device_id=device.id,
+            generation=w.generation,
             state="running" if device.autonomy == "automatic" else "offered",
-            token_reservation=amount, created=self.clock(), last_contact=self.clock())
+            token_reservation=amount,
+            created=self.clock(),
+            last_contact=self.clock(),
+        )
         s.add(lease)
         s.flush()
         w.active_lease = lease.id
         w.state = "in_progress"
-        audit(s, p.id, device.user_id, "allocation.created", lease_id=lease.id, generation=lease.generation)
-        status(s, w, f"Work allocated. Execution mode: {device.autonomy}. Human approval is required before a draft PR is created.")
+        audit(
+            s,
+            p.id,
+            device.user_id,
+            "allocation.created",
+            lease_id=lease.id,
+            generation=lease.generation,
+        )
+        status(
+            s,
+            w,
+            f"Work allocated. Execution mode: {device.autonomy}. Human approval is required before a draft PR is created.",
+        )
         return lease
 
     def orphaned(self, lease: Lease) -> bool:
@@ -114,16 +205,23 @@ class Coordinator:
         # deliberately, after a device stops heartbeating by design (see `complete()`), and must only
         # ever be resolved by a human review action, never auto-reclaimed by a sibling device's routine
         # poll within the grace period.
-        return lease.state == "running" and self.clock() - lease.last_contact >= self.settings.orphan_seconds
+        return (
+            lease.state == "running"
+            and self.clock() - lease.last_contact >= self.settings.orphan_seconds
+        )
 
     def poll(self, s, device: Device, repositories: list[str]) -> Lease | None:
         device.last_seen = self.clock()
         if not device.enabled:
             return None
-        current = s.scalar(select(Lease).where(Lease.device_id == device.id, Lease.state.in_(ACTIVE)))
+        current = s.scalar(
+            select(Lease).where(Lease.device_id == device.id, Lease.state.in_(ACTIVE))
+        )
         if current:
             return current
-        blocking = s.scalar(select(Lease).where(Lease.user_id == device.user_id, Lease.state.in_(ACTIVE)))
+        blocking = s.scalar(
+            select(Lease).where(Lease.user_id == device.user_id, Lease.state.in_(ACTIVE))
+        )
         if blocking:
             # `blocking.device_id` cannot equal `device.id` here (that case is `current`, above), so this
             # lease belongs to a different device row of the same person. This device is live right now
@@ -134,14 +232,24 @@ class Coordinator:
             if self.orphaned(blocking):
                 w = get(s, Work, blocking.work_id)
                 self.release(s, blocking, terminal="reclaimed")
-                status(s, w, "The previous device went silent past the heartbeat grace period. "
-                              "The allocation was reclaimed so another of your devices is not blocked.")
+                status(
+                    s,
+                    w,
+                    "The previous device went silent past the heartbeat grace period. "
+                    "The allocation was reclaimed so another of your devices is not blocked.",
+                )
             else:
                 return None
         candidates = list(s.scalars(select(Work).where(Work.state == "queued")))
+
         def score(w):
             policy = Policy(**get(s, Project, w.project_id).policy)
-            return (-w.created if policy.strategy == "fifo" else w.priority * 3600 + self.clock() - w.created)
+            return (
+                -w.created
+                if policy.strategy == "fifo"
+                else w.priority * 3600 + self.clock() - w.created
+            )
+
         candidates.sort(key=lambda w: (score(w), w.id), reverse=True)
         for w in candidates:
             if get(s, Project, w.project_id).repository not in repositories:
@@ -151,14 +259,20 @@ class Coordinator:
                 return lease
         return None
 
-    def fence(self, s, lease_id: str, device: Device, generation: int, states=None) -> tuple[Lease, Work]:
+    def fence(
+        self, s, lease_id: str, device: Device, generation: int, states=None
+    ) -> tuple[Lease, Work]:
         lease = get(s, Lease, lease_id)
         w = get(s, Work, lease.work_id)
         if lease.device_id != device.id:
             fail(403, "This device does not own the lease")
         if not device.enabled:
             fail(409, "Device is paused or revoked")
-        if w.active_lease != lease.id or generation != w.generation or lease.generation != generation:
+        if (
+            w.active_lease != lease.id
+            or generation != w.generation
+            or lease.generation != generation
+        ):
             fail(409, "Lease fencing token is obsolete; stop the process")
         if not get(s, Project, w.project_id).active:
             fail(409, "Project is disabled")
@@ -172,10 +286,18 @@ class Coordinator:
             return
         p = get(s, Project, get(s, Work, lease.work_id).project_id)
         usage = lease.usage or {}
-        known = usage.get("complete") and usage.get("input_tokens") is not None and usage.get("output_tokens") is not None
+        known = (
+            usage.get("complete")
+            and usage.get("input_tokens") is not None
+            and usage.get("output_tokens") is not None
+        )
         # Unknown consumption is NOT zero. Retain the entire reservation in quota accounting.
         observed = (usage.get("input_tokens") or 0) + (usage.get("output_tokens") or 0)
-        amount = observed if known else (0 if lease.state == "offered" else max(observed, lease.token_reservation))
+        amount = (
+            observed
+            if known
+            else (0 if lease.state == "offered" else max(observed, lease.token_reservation))
+        )
         p.reserved_tokens = max(0, p.reserved_tokens - lease.token_reservation)
         p.spent_tokens += amount
         lease.settled = True
@@ -198,16 +320,27 @@ class Coordinator:
                 self.release(s, lease)
                 if not s.get(Decline, (lease.user_id, w.id)):
                     s.add(Decline(user_id=lease.user_id, work_id=w.id))
-                status(s, w, "The allocation offer expired without acceptance. Work is available again.")
+                status(
+                    s,
+                    w,
+                    "The allocation offer expired without acceptance. Work is available again.",
+                )
             elif lease.state == "dibbed" and lease.dib_expires <= now:
                 candidate = s.get(Device, lease.dib_device)
                 self.release(s, lease, terminal="reassigned")
                 if candidate:
                     self.allocate(s, candidate, w)
-                status(s, w, "The 12-hour recovery window expired. The old lease is fenced out; checkpoint history is preserved.")
+                status(
+                    s,
+                    w,
+                    "The 12-hour recovery window expired. The old lease is fenced out; checkpoint history is preserved.",
+                )
 
     def stale(self, lease: Lease) -> bool:
-        return lease.state in STALEABLE and self.clock() - lease.last_contact >= self.settings.stale_seconds
+        return (
+            lease.state in STALEABLE
+            and self.clock() - lease.last_contact >= self.settings.stale_seconds
+        )
 
     def dib(self, s, lease: Lease, device: Device):
         w = get(s, Work, lease.work_id)
@@ -221,8 +354,19 @@ class Coordinator:
         lease.dib_user = device.user_id
         lease.dib_device = device.id
         lease.dib_expires = self.clock() + self.settings.recovery_seconds
-        audit(s, w.project_id, device.user_id, "allocation.dibbed", lease_id=lease.id, recovery_deadline=lease.dib_expires)
-        status(s, w, "Another contributor requested this stale task. The original contributor has 12 hours to explicitly recover it.")
+        audit(
+            s,
+            w.project_id,
+            device.user_id,
+            "allocation.dibbed",
+            lease_id=lease.id,
+            recovery_deadline=lease.dib_expires,
+        )
+        status(
+            s,
+            w,
+            "Another contributor requested this stale task. The original contributor has 12 hours to explicitly recover it.",
+        )
 
     def recover(self, s, lease: Lease, user_id: str):
         w = get(s, Work, lease.work_id)
@@ -247,7 +391,10 @@ class Coordinator:
             fail(409, "Complete all workflow phases before requesting review")
         e = payload.evidence
         if (e.baseline_exit, e.red_exit, e.green_exit, e.verify_exit) != (0, 1, 0, 0):
-            fail(422, "Required evidence: passing baseline, failing test, passing implementation, passing verification")
+            fail(
+                422,
+                "Required evidence: passing baseline, failing test, passing implementation, passing verification",
+            )
         if e.profile != Policy(**get(s, Project, w.project_id).policy).test_profile:
             fail(409, "Test profile changed; rerun using the current policy")
         if payload.checkpoint.sha != e.green_commit:
@@ -258,15 +405,35 @@ class Coordinator:
         lease.usage = payload.usage.model_dump()
         lease.summary = redact(payload.summary)
         lease.diff = diff
-        lease.review_digest = digest(canonical({"checkpoint": lease.checkpoint, "evidence": lease.evidence,
-            "summary": lease.summary, "diff": lease.diff, "usage": lease.usage}))
+        lease.review_digest = digest(
+            canonical(
+                {
+                    "checkpoint": lease.checkpoint,
+                    "evidence": lease.evidence,
+                    "summary": lease.summary,
+                    "diff": lease.diff,
+                    "usage": lease.usage,
+                }
+            )
+        )
         lease.approved_sha = lease.maintainer_sha = ""
         lease.state = "awaiting_review"
         lease.last_contact = self.clock()
         w.state = "review"
         self.settle(s, lease)
-        audit(s, w.project_id, lease.user_id, "review.requested", lease_id=lease.id, sha=payload.checkpoint.sha)
-        status(s, w, "Implementation and test evidence are ready. No PR has been created. The contributor must review and approve the exact commit.")
+        audit(
+            s,
+            w.project_id,
+            lease.user_id,
+            "review.requested",
+            lease_id=lease.id,
+            sha=payload.checkpoint.sha,
+        )
+        status(
+            s,
+            w,
+            "Implementation and test evidence are ready. No PR has been created. The contributor must review and approve the exact commit.",
+        )
 
     def approve(self, s, lease: Lease, user_id: str, payload):
         w = get(s, Work, lease.work_id)
@@ -274,7 +441,10 @@ class Coordinator:
         m = member(s, p, user_id)
         if not p.active or w.active_lease != lease.id or lease.state != "awaiting_review":
             fail(409, "This review is not current")
-        if payload.sha != lease.checkpoint.get("sha") or payload.review_digest != lease.review_digest:
+        if (
+            payload.sha != lease.checkpoint.get("sha")
+            or payload.review_digest != lease.review_digest
+        ):
             fail(409, "The commit or review changed; reload the review")
         if user_id == lease.user_id:
             lease.approved_sha = payload.sha
@@ -282,41 +452,86 @@ class Coordinator:
             lease.maintainer_sha = payload.sha
         else:
             fail(403, "Only the contributor or a maintainer may approve this review")
-        audit(s, p.id, user_id, "review.approved", lease_id=lease.id, sha=payload.sha, digest=payload.review_digest)
+        audit(
+            s,
+            p.id,
+            user_id,
+            "review.approved",
+            lease_id=lease.id,
+            sha=payload.sha,
+            digest=payload.review_digest,
+        )
         policy = Policy(**p.policy)
         if lease.approved_sha and (not policy.require_maintainer_approval or lease.maintainer_sha):
             lease.state = "publishing"
             w.state = "publishing"
             key = f"publish:{lease.id}:{payload.sha}"
             if not s.scalar(select(Outbox).where(Outbox.key == key)):
-                s.add(Outbox(key=key, project_id=p.id, kind="publish", payload={"lease_id": lease.id, "sha": payload.sha}))
+                s.add(
+                    Outbox(
+                        key=key,
+                        project_id=p.id,
+                        kind="publish",
+                        payload={"lease_id": lease.id, "sha": payload.sha},
+                    )
+                )
 
 
 def public_receipt(lease: Lease) -> dict:
     """Strict allowlist. Prompts, paths, device identity and transcript text never enter a PR receipt."""
     u = lease.usage or {}
     lines = (lease.diff or "").splitlines()
-    evidence_keys = ("execution_mode", "interaction_capture", "profile", "baseline_exit", "red_exit", "green_exit", "verify_exit", "spec_sha256",
-                     "behavior_sha256", "tests_sha256", "baseline_commit", "red_commit", "green_commit")
-    return {"schema": "co4.receipt.v1", "run": lease.id, "commit": lease.checkpoint.get("sha"),
-        "allocation_generation": lease.generation, "accounting_scope": "this allocation only",
-        "change_metrics": {"files_changed": sum(line.startswith("diff --git ") for line in lines),
-            "lines_added": sum(line.startswith("+") and not line.startswith("+++") for line in lines),
-            "lines_deleted": sum(line.startswith("-") and not line.startswith("---") for line in lines),
-            "scope": "reviewed diff, including specification artifacts; not a difficulty score"},
+    evidence_keys = (
+        "execution_mode",
+        "interaction_capture",
+        "profile",
+        "baseline_exit",
+        "red_exit",
+        "green_exit",
+        "verify_exit",
+        "spec_sha256",
+        "behavior_sha256",
+        "tests_sha256",
+        "baseline_commit",
+        "red_commit",
+        "green_commit",
+    )
+    return {
+        "schema": "co4.receipt.v1",
+        "run": lease.id,
+        "commit": lease.checkpoint.get("sha"),
+        "allocation_generation": lease.generation,
+        "accounting_scope": "this allocation only",
+        "change_metrics": {
+            "files_changed": sum(line.startswith("diff --git ") for line in lines),
+            "lines_added": sum(
+                line.startswith("+") and not line.startswith("+++") for line in lines
+            ),
+            "lines_deleted": sum(
+                line.startswith("-") and not line.startswith("---") for line in lines
+            ),
+            "scope": "reviewed diff, including specification artifacts; not a difficulty score",
+        },
         "verification": {key: (lease.evidence or {}).get(key) for key in evidence_keys},
-        "duration_seconds": u.get("duration_seconds"), "input_tokens": u.get("input_tokens"),
-        "cached_input_tokens": u.get("cached_input_tokens"), "output_tokens": u.get("output_tokens"),
-        "reported_cost_usd": u.get("cost_usd"), "usage_complete": u.get("complete", False),
-        "usage_source": u.get("source", "unavailable"), "evidence": "worker-reported; independent CI required",
-        "workflow": "specification → behavior → red → green → verify → human approval"}
+        "duration_seconds": u.get("duration_seconds"),
+        "input_tokens": u.get("input_tokens"),
+        "cached_input_tokens": u.get("cached_input_tokens"),
+        "output_tokens": u.get("output_tokens"),
+        "reported_cost_usd": u.get("cost_usd"),
+        "usage_complete": u.get("complete", False),
+        "usage_source": u.get("source", "unavailable"),
+        "evidence": "worker-reported; independent CI required",
+        "workflow": "specification → behavior → red → green → verify → human approval",
+    }
 
 
 def pr_body(lease: Lease, number: int) -> str:
     summary = lease.summary.replace("@", "@\u200b")
-    return (f"Closes #{number}\n\n## Contribution\n\n{summary}\n\n"
+    return (
+        f"Closes #{number}\n\n## Contribution\n\n{summary}\n\n"
         "## Execution receipt\n\nThe contributor approved this exact commit and review package. "
         "This is a draft PR, not permission to merge. Usage is reported by the harness, not independently billed. "
         "Null means unavailable, never free. No prompts or transcripts are included.\n\n"
         f"```json\n{__import__('json').dumps(public_receipt(lease), indent=2)}\n```\n\n"
-        f"<!-- co4:submission:{lease.id} -->")
+        f"<!-- co4:submission:{lease.id} -->"
+    )
