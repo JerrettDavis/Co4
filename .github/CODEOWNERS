@@ -1,0 +1,6 @@
+# CODEOWNERS file for the Co4 project
+# Enables requiring code-owner review in branch protection settings
+# See: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# All paths route to the sole maintainer until additional collaborators are added
+* @JerrettDavis
