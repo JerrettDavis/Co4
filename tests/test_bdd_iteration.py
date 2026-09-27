@@ -13,7 +13,7 @@ from sqlalchemy import select
 from test_integrations import send_hook
 from test_submission_lookup import _publish
 
-from co4.models import Lease, Project, Submission, Work
+from co4.models import Audit, Lease, Project, Submission, Work
 from co4.schemas import Policy
 
 scenarios("iteration.feature")
@@ -122,6 +122,18 @@ def review_changes_requested_denied(app, monkeypatch, ctx):
     assert response.status_code == 200
 
 
+@when("an unprivileged commenter comments slash co4 revise on the pull request")
+def slash_revise_denied(app, monkeypatch, ctx):
+    _permit(app, monkeypatch, set())
+    response = send_hook(
+        app,
+        comment_payload(ctx["number"], "random-user", "/co4 revise please handle the edge case"),
+        kind="issue_comment",
+        delivery="revise-comment-denied",
+    )
+    assert response.status_code == 200
+
+
 @when("a maintainer comments slash co4 revise on the pull request")
 def slash_revise(app, monkeypatch, ctx):
     _permit(app, monkeypatch, {"maintainer"})
@@ -223,6 +235,17 @@ def submission_still_open(app, ctx):
     with app.state.db.read() as s:
         w = s.get(Work, ctx["job"]["work"]["id"])
         assert w.state == "submitted"
+
+
+@then("a permission denial is audited")
+def permission_denial_audited(app, ctx):
+    with app.state.db.read() as s:
+        entries = list(s.scalars(select(Audit)))
+    work_id = ctx["job"]["work"]["id"]
+    assert any(
+        e.action == "github_command.denied" and e.detail.get("work_id") == work_id
+        for e in entries
+    )
 
 
 @then("only one revision round was requested")

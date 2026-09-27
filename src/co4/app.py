@@ -1171,6 +1171,12 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
         # event authored by our own App bot -- that would be a self-triggered loop.
         app_bot = (cfg.app_slug + "[bot]") if cfg.app_slug else None
         revision_permitted = False
+        # Set alongside revision_permitted whenever the event structurally qualifies as a
+        # revision trigger and a real can_manage check ran -- as opposed to revision_permitted
+        # staying False just because cfg.demo skipped the check, or the event/sender didn't
+        # match at all. Lets the handlers below tell "denied" apart from "not applicable" so a
+        # genuine permission denial can be audited instead of silently doing nothing.
+        revision_check_attempted = False
         if (
             pd
             and kind == "pull_request_review"
@@ -1179,6 +1185,7 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
             and payload.get("review", {}).get("user", {}).get("login") != app_bot
             and not cfg.demo
         ):
+            revision_check_attempted = True
             revision_permitted = await asyncio.to_thread(
                 gateway.can_manage,  # type: ignore[union-attr]
                 installation,
@@ -1195,6 +1202,7 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
             and payload.get("sender", {}).get("login") != app_bot
             and not cfg.demo
         ):
+            revision_check_attempted = True
             revision_permitted = await asyncio.to_thread(
                 gateway.can_manage,  # type: ignore[union-attr]
                 installation,
@@ -1291,7 +1299,7 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
                 and "pull_request" in payload.get("issue", {})
             ):
                 text = payload.get("comment", {}).get("body", "").strip()
-                if text.startswith("/co4 revise") and revision_permitted:
+                if text.startswith("/co4 revise"):
                     submission = s.scalar(
                         select(Submission).where(
                             Submission.project_id == p.id,
@@ -1300,36 +1308,49 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
                     )
                     if submission:
                         w = get(s, Work, submission.work_id)
-                        outcome = iteration.request_revision(
-                            s,
-                            coordinator,
-                            p,
-                            w,
-                            submission,
-                            review_id=f"comment:{payload.get('comment', {}).get('id')}",
-                            trigger="revise_comment",
-                            feedback_text=text,
-                            reviewer_login=payload.get("sender", {}).get("login", ""),
-                            # issue_comment payloads carry no PR head SHA; outdated-head
-                            # filtering only applies to pull_request_review, which does.
-                            head_sha=None,
-                        )
-                        # "escalated" already gets its own detailed audit entry from
-                        # iteration.escalate(); every other non-"requested" outcome is otherwise
-                        # a silent no-op, so record why this comment produced no visible action.
-                        if outcome not in {"requested", "escalated"}:
+                        if revision_permitted:
+                            outcome = iteration.request_revision(
+                                s,
+                                coordinator,
+                                p,
+                                w,
+                                submission,
+                                review_id=f"comment:{payload.get('comment', {}).get('id')}",
+                                trigger="revise_comment",
+                                feedback_text=text,
+                                reviewer_login=payload.get("sender", {}).get("login", ""),
+                                # issue_comment payloads carry no PR head SHA; outdated-head
+                                # filtering only applies to pull_request_review, which does.
+                                head_sha=None,
+                            )
+                            # "escalated" already gets its own detailed audit entry from
+                            # iteration.escalate(); every other non-"requested" outcome is
+                            # otherwise a silent no-op, so record why this comment produced no
+                            # visible action.
+                            if outcome not in {"requested", "escalated"}:
+                                audit(
+                                    s,
+                                    p.id,
+                                    "github",
+                                    "revision.request_ignored",
+                                    work_id=w.id,
+                                    trigger="revise_comment",
+                                    outcome=outcome,
+                                )
+                        elif revision_check_attempted:
+                            # Sender lacks can_manage: same denial shape as the /co4
+                            # validate|approve|recover path above.
                             audit(
                                 s,
                                 p.id,
                                 "github",
-                                "revision.request_ignored",
+                                "github_command.denied",
                                 work_id=w.id,
                                 trigger="revise_comment",
-                                outcome=outcome,
                             )
             elif kind == "pull_request_review" and action == "submitted":
                 review = payload.get("review", {})
-                if review.get("state") == "approved" and revision_permitted:
+                if review.get("state") == "approved":
                     submission = s.scalar(
                         select(Submission).where(
                             Submission.project_id == p.id,
@@ -1338,13 +1359,23 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
                         )
                     )
                     if submission:
-                        iteration.review_approved(
-                            s,
-                            get(s, Work, submission.work_id),
-                            submission,
-                            head_sha=review.get("commit_id"),
-                        )
-                elif review.get("state") == "changes_requested" and revision_permitted:
+                        if revision_permitted:
+                            iteration.review_approved(
+                                s,
+                                get(s, Work, submission.work_id),
+                                submission,
+                                head_sha=review.get("commit_id"),
+                            )
+                        elif revision_check_attempted:
+                            audit(
+                                s,
+                                p.id,
+                                "github",
+                                "github_command.denied",
+                                work_id=submission.work_id,
+                                trigger="approved",
+                            )
+                elif review.get("state") == "changes_requested":
                     pr = payload.get("pull_request", {})
                     submission = s.scalar(
                         select(Submission).where(
@@ -1354,29 +1385,40 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
                     )
                     if submission:
                         w = get(s, Work, submission.work_id)
-                        outcome = iteration.request_revision(
-                            s,
-                            coordinator,
-                            p,
-                            w,
-                            submission,
-                            review_id=f"review:{review.get('id')}",
-                            trigger="changes_requested",
-                            feedback_text=review.get("body") or "",
-                            reviewer_login=review.get("user", {}).get("login", ""),
-                            head_sha=review.get("commit_id"),
-                        )
-                        # See the /co4 revise comment handler above: "escalated" audits itself,
-                        # every other non-"requested" outcome would otherwise be a silent no-op.
-                        if outcome not in {"requested", "escalated"}:
+                        if revision_permitted:
+                            outcome = iteration.request_revision(
+                                s,
+                                coordinator,
+                                p,
+                                w,
+                                submission,
+                                review_id=f"review:{review.get('id')}",
+                                trigger="changes_requested",
+                                feedback_text=review.get("body") or "",
+                                reviewer_login=review.get("user", {}).get("login", ""),
+                                head_sha=review.get("commit_id"),
+                            )
+                            # See the /co4 revise comment handler above: "escalated" audits
+                            # itself, every other non-"requested" outcome would otherwise be a
+                            # silent no-op.
+                            if outcome not in {"requested", "escalated"}:
+                                audit(
+                                    s,
+                                    p.id,
+                                    "github",
+                                    "revision.request_ignored",
+                                    work_id=w.id,
+                                    trigger="changes_requested",
+                                    outcome=outcome,
+                                )
+                        elif revision_check_attempted:
                             audit(
                                 s,
                                 p.id,
                                 "github",
-                                "revision.request_ignored",
+                                "github_command.denied",
                                 work_id=w.id,
                                 trigger="changes_requested",
-                                outcome=outcome,
                             )
             elif kind == "pull_request":
                 pr = payload.get("pull_request", {})

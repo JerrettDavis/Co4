@@ -9,11 +9,18 @@ Feature: PR review iteration
     Given a published draft PR with an approved commit
     When a reviewer without write access requests changes on the current head
     Then the submission is still open
+    And a permission denial is audited
 
   Scenario: A permitted maintainer can request revision with a slash command
     Given a published draft PR with an approved commit
     When a maintainer comments slash co4 revise on the pull request
     Then the submission moves to changes requested
+
+  Scenario: An unprivileged commenter cannot request revision with a slash command
+    Given a published draft PR with an approved commit
+    When an unprivileged commenter comments slash co4 revise on the pull request
+    Then the submission is still open
+    And a permission denial is audited
 
   Scenario: A review of an outdated head is ignored
     Given a published draft PR with an approved commit
