@@ -20,6 +20,16 @@ Feature: PR review iteration
     When a reviewer with write access requests changes on a stale head
     Then the submission is still open
 
+  Scenario: A changes-requested review missing its commit id is treated as suspect
+    Given a published draft PR with an approved commit
+    When a reviewer with write access requests changes with no commit id
+    Then the submission is still open
+
+  Scenario: An approval missing its commit id is treated as suspect
+    Given a published draft PR with an approved commit
+    When a reviewer with write access approves with no commit id
+    Then the submission is still open
+
   Scenario: The same review cannot open two revision rounds
     Given a published draft PR with an approved commit
     When a reviewer with write access requests changes on the current head

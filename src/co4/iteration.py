@@ -48,6 +48,13 @@ SETTLED_STATES = {"merged", "closed"}
 
 NEEDS_HUMAN_LABEL = "co4:needs-human"
 
+# issue_comment payloads (the "/co4 revise" trigger) carry no PR head commit at all -- there is
+# nothing to compare against, so `head_sha` is legitimately None for this trigger alone. Every
+# other trigger originates from a pull_request_review event, which always carries the reviewed
+# commit; a None there means the payload is missing a security-relevant field, not that the
+# check doesn't apply, and must be treated as suspect rather than silently skipped.
+NO_HEAD_SHA_TRIGGER = "revise_comment"
+
 
 def request_revision(
     s,
@@ -65,10 +72,10 @@ def request_revision(
     """Record reviewer feedback and mark `work`/`submission` for a new revision round.
 
     Returns a short outcome tag describing what happened: "requested", "duplicate",
-    "already_open", "outdated_head", "trigger_disabled", "settled", or "escalated". Callers
-    (the webhook handler, tests) can use this to decide what else to log/assert; every outcome
-    other than "requested" and "escalated" is a deliberate, silent no-op -- these are exactly
-    the loop guards this module exists to enforce.
+    "already_open", "outdated_head", "missing_head_sha", "trigger_disabled", "settled", or
+    "escalated". Callers (the webhook handler, tests) can use this to decide what else to
+    log/assert; every outcome other than "requested" and "escalated" is a deliberate, silent
+    no-op -- these are exactly the loop guards this module exists to enforce.
     """
     policy = Policy(**project.policy)
     if trigger not in policy.revision_triggers:
@@ -79,7 +86,11 @@ def request_revision(
         # Escalation is sticky: only a maintainer (outside this flow) may resume automation.
         return "escalated"
     # A review of a diff that is no longer the PR's actual head is reviewing stale content;
-    # never let it drive a new round the reviewer never saw.
+    # never let it drive a new round the reviewer never saw. A trigger whose event structurally
+    # carries no head commit is not suspect (see NO_HEAD_SHA_TRIGGER); a missing one from any
+    # other trigger is treated the same as a mismatch, not silently passed through.
+    if head_sha is None and trigger != NO_HEAD_SHA_TRIGGER:
+        return "missing_head_sha"
     if head_sha is not None and head_sha != submission.expected_head_sha:
         return "outdated_head"
     if review_id and submission.last_review_id == review_id:
@@ -197,7 +208,10 @@ def review_approved(s, work: Work, submission: Submission, *, head_sha: str | No
     Co4 never merges. Returns True when the submission state changed."""
     if submission.state not in {"open", "awaiting_rereview"}:
         return False
-    if head_sha is not None and head_sha != submission.expected_head_sha:
+    # An approval always originates from a pull_request_review event, which always carries the
+    # reviewed commit; a missing one is a malformed/suspect payload, not a wildcard match, so it
+    # is compared for equality just like any other value and never matches.
+    if head_sha != submission.expected_head_sha:
         return False
     submission.state = "approved"
     submission.updated = time.time()

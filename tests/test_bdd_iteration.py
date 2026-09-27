@@ -148,6 +148,30 @@ def review_stale_head(app, monkeypatch, ctx):
     assert response.status_code == 200
 
 
+@when("a reviewer with write access requests changes with no commit id")
+def review_missing_commit_id(app, monkeypatch, ctx):
+    _permit(app, monkeypatch, {"trusted-reviewer"})
+    response = send_hook(
+        app,
+        review_payload(ctx["number"], None, "changes_requested", "rv-no-sha", "trusted-reviewer"),
+        kind="pull_request_review",
+        delivery="review-no-sha",
+    )
+    assert response.status_code == 200
+
+
+@when("a reviewer with write access approves with no commit id")
+def review_approved_missing_commit_id(app, monkeypatch, ctx):
+    _permit(app, monkeypatch, {"trusted-reviewer"})
+    response = send_hook(
+        app,
+        review_payload(ctx["number"], None, "approved", "rv-approve-no-sha", "trusted-reviewer"),
+        kind="pull_request_review",
+        delivery="review-approve-no-sha",
+    )
+    assert response.status_code == 200
+
+
 @when("that same review is redelivered")
 def redeliver_same_review(app, monkeypatch, ctx):
     _permit(app, monkeypatch, {"trusted-reviewer"})
