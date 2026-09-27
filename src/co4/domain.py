@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from typing import NoReturn
 
 from fastapi import HTTPException
 from sqlalchemy import select
@@ -14,7 +15,7 @@ STALEABLE = {"running", "blocked", "awaiting_review"}
 ROLES = {"owner", "maintainer", "triager", "contributor"}
 
 
-def fail(status: int, message: str):
+def fail(status: int, message: str) -> NoReturn:
     raise HTTPException(status, message)
 
 

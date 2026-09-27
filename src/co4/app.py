@@ -379,8 +379,8 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
             if not saved or saved.expires <= time.time():
                 fail(400, "OAuth state expired or has already been used")
             s.delete(saved)
-        access = gateway.exchange(code)
-        identity = gateway.user(access)
+        access = gateway.exchange(code)  # type: ignore[union-attr]
+        identity = gateway.user(access)  # type: ignore[union-attr]
         with database.transaction() as s:
             u = s.scalar(select(User).where(User.github_id == identity["id"]))
             if not u:
@@ -401,7 +401,7 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
         client_host = request.client.host if request.client else "unknown"
         if not device_code_limiter.hit(f"device-code:{client_host}"):
             fail(429, "Too many device sign-in attempts from this address. Try again later.")
-        data = gateway.request_device_code(DEVICE_SCOPES)
+        data = gateway.request_device_code(DEVICE_SCOPES)  # type: ignore[union-attr]
         interval = int(data.get("interval") or DEVICE_INTERVAL_DEFAULT)
         expires_at = time.time() + int(data.get("expires_in") or DEVICE_EXPIRES_IN_DEFAULT)
         with database.transaction() as s:
@@ -437,11 +437,11 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
                 fail(409, "Device code already consumed")
             if record.expires_at <= time.time():
                 fail(400, "Device code expired")
-        outcome = gateway.poll_device_token(body.device_code)
+        outcome = gateway.poll_device_token(body.device_code)  # type: ignore[union-attr]
         status = outcome.get("status")
         if status == "authorized":
             access = outcome["access_token"]
-            identity = gateway.user(access)
+            identity = gateway.user(access)  # type: ignore[union-attr]
             with database.transaction() as s:
                 record = s.get(DeviceFlow, body.device_code)
                 if record.completed_at:
@@ -463,10 +463,10 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
             # Omitting it lets the frontend tell "GitHub said use exactly N seconds" apart
             # from "GitHub said nothing; add 5s to whatever interval you're already using."
             explicit_interval = outcome.get("interval")
-            body = {"status": "slow_down"}
+            slow_down: dict[str, str | int] = {"status": "slow_down"}
             if explicit_interval is not None:
-                body["interval"] = int(explicit_interval)
-            return JSONResponse(body)
+                slow_down["interval"] = int(explicit_interval)
+            return JSONResponse(slow_down)
         if status == "pending":
             return JSONResponse({"status": "pending"})
         if status == "expired":
@@ -527,21 +527,21 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
     def installations(request: Request, u=Depends(user)):  # noqa: B008
         return [
             {"id": x["id"], "account": x["account"]["login"]}
-            for x in gateway.installations(gh_user_token(request))
+            for x in gateway.installations(gh_user_token(request))  # type: ignore[union-attr]
         ]
 
     @app.get("/api/github/repositories/{installation_id}")
     def repositories(installation_id: int, request: Request, u=Depends(user)):  # noqa: B008
         return [
             {"repository": x["full_name"], "admin": x.get("permissions", {}).get("admin", False)}
-            for x in gateway.repositories(gh_user_token(request), installation_id)
+            for x in gateway.repositories(gh_user_token(request), installation_id)  # type: ignore[union-attr]
         ]
 
     @app.post("/api/projects")
     def enroll(payload: EnrollProject, request: Request, u=Depends(user)):  # noqa: B008
         if cfg.demo:
             fail(409, "Offline demo uses a fixture project; production enrollment requires GitHub")
-        repositories = gateway.repositories(gh_user_token(request), payload.installation_id)
+        repositories = gateway.repositories(gh_user_token(request), payload.installation_id)  # type: ignore[union-attr]
         repo = next(
             (r for r in repositories if r["full_name"].lower() == payload.repository.lower()), None
         )
@@ -712,7 +712,7 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
             data = project_data(p)
         if cfg.demo:
             return {"imported": 0, "mode": "demo"}
-        issues = gateway.issues(data)
+        issues = gateway.issues(data)  # type: ignore[union-attr]
         with database.transaction() as s:
             p = get(s, Project, project_id)
             for issue in issues:
@@ -1145,7 +1145,7 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
                 x["name"] for x in payload.get("issue", {}).get("labels", [])
             ]:
                 trusted_ready = await asyncio.to_thread(
-                    gateway.can_manage,
+                    gateway.can_manage,  # type: ignore[union-attr]
                     installation,
                     pd["repository_id"],
                     pd["repository"],
