@@ -6,7 +6,18 @@ from typing import NoReturn
 from fastapi import HTTPException
 from sqlalchemy import select
 
-from co4.models import Audit, Decline, Device, Lease, Member, Outbox, Project, User, Work
+from co4.models import (
+    Audit,
+    Decline,
+    Device,
+    Lease,
+    Member,
+    Outbox,
+    Project,
+    Submission,
+    User,
+    Work,
+)
 from co4.schemas import Policy
 from co4.security import canonical, digest, redact
 
@@ -102,11 +113,48 @@ def lease_data(s, lease: Lease, *, detail: bool = False) -> dict:
             "dib_expires",
             "pr_url",
             "error",
+            "kind",
+            "parent_lease_id",
+            "round",
+            "feedback",
         )
     }
     result["contributor"] = get(s, User, lease.user_id).login
     if detail:
         result.update(summary=lease.summary, diff=lease.diff)
+    return result
+
+
+def submission_data(s, submission: Submission) -> dict:
+    """PR review-iteration status for the UI: the PR, its revision round, its state, and a
+    short excerpt of the latest reviewer feedback (already redacted at ingestion)."""
+    result = {
+        k: getattr(submission, k)
+        for k in (
+            "id",
+            "work_id",
+            "pr_number",
+            "head_branch",
+            "expected_head_sha",
+            "round",
+            "state",
+            "updated",
+        )
+    }
+    result["revisions"] = max(0, submission.round - 1)
+    result["feedback"] = None
+    for lease in s.scalars(
+        select(Lease).where(Lease.work_id == submission.work_id).order_by(Lease.created.desc())
+    ):
+        fb = lease.feedback or {}
+        if fb.get("body") is not None and fb.get("trigger"):
+            body = " ".join(str(fb.get("body") or "").split())
+            result["feedback"] = {
+                "reviewer": fb.get("reviewer", ""),
+                "trigger": fb.get("trigger", ""),
+                "excerpt": body[:280] + ("…" if len(body) > 280 else ""),
+            }
+            break
     return result
 
 
@@ -159,7 +207,12 @@ class Coordinator:
         return True
 
     def allocate(self, s, device: Device, w: Work) -> Lease | None:
-        if w.state != "queued" or w.active_lease or not self.eligible(s, device, w):
+        # "revision_requested" is a fixed-work-item counterpart of "queued": routing (see
+        # iteration.route(), consulted by poll() before it ever calls allocate) has already
+        # decided this device may claim it right now.
+        if w.state not in {"queued", "revision_requested"} or w.active_lease:
+            return None
+        if not self.eligible(s, device, w):
             return None
         if s.scalar(select(Lease).where(Lease.user_id == device.user_id, Lease.state.in_(ACTIVE))):
             return None
@@ -167,6 +220,12 @@ class Coordinator:
         amount = min(device.max_tokens, Policy(**p.policy).max_task_tokens)
         if p.spent_tokens + p.reserved_tokens + amount > p.budget_tokens:
             return None
+        revising = w.state == "revision_requested"
+        submission = (
+            s.scalar(select(Submission).where(Submission.work_id == w.id)) if revising else None
+        )
+        if revising and not submission:
+            return None  # Data integrity issue; nothing to revise against.
         p.reserved_tokens += amount
         w.generation += 1
         lease = Lease(
@@ -179,6 +238,23 @@ class Coordinator:
             created=self.clock(),
             last_contact=self.clock(),
         )
+        if submission:
+            parent = s.scalar(
+                select(Lease).where(Lease.work_id == w.id).order_by(Lease.created.desc())
+            )
+            lease.kind = "revision"
+            lease.parent_lease_id = parent.id if parent else None
+            lease.round = submission.round + 1
+            lease.feedback = (parent.feedback if parent else None) or {}
+            # Handover checkpoint: the approved, App-frozen submission commit, not the
+            # worker's old moving work branch. See GitHub.publish / Submission.
+            w.checkpoint = {
+                "repository": p.repository,
+                "branch": submission.head_branch,
+                "sha": submission.expected_head_sha,
+            }
+            submission.state = "revising"
+            submission.updated = self.clock()
         s.add(lease)
         s.flush()
         w.active_lease = lease.id
@@ -190,12 +266,16 @@ class Coordinator:
             "allocation.created",
             lease_id=lease.id,
             generation=lease.generation,
+            kind=lease.kind,
         )
         status(
             s,
             w,
             f"Work allocated. Execution mode: {device.autonomy}. Human approval is required "
-            "before a draft PR is created.",
+            "before a draft PR is created."
+            if not revising
+            else f"Revision round {lease.round} allocated. Execution mode: {device.autonomy}. "
+            "Human approval is required before the submission branch is updated.",
         )
         return lease
 
@@ -243,7 +323,9 @@ class Coordinator:
                 )
             else:
                 return None
-        candidates = list(s.scalars(select(Work).where(Work.state == "queued")))
+        candidates = list(
+            s.scalars(select(Work).where(Work.state.in_(("queued", "revision_requested"))))
+        )
 
         def score(w):
             policy = Policy(**get(s, Project, w.project_id).policy)
@@ -254,8 +336,12 @@ class Coordinator:
             )
 
         candidates.sort(key=lambda w: (score(w), w.id), reverse=True)
+        from co4 import iteration  # local import: co4.iteration imports co4.domain
+
         for w in candidates:
             if get(s, Project, w.project_id).repository not in repositories:
+                continue
+            if w.state == "revision_requested" and not iteration.route(s, self, device, w):
                 continue
             lease = self.allocate(s, device, w)
             if lease:
@@ -311,7 +397,19 @@ class Coordinator:
         lease.state = terminal
         if w.active_lease == lease.id:
             w.active_lease = None
-            w.state = "queued" if requeue else "validation_pending"
+            if not requeue:
+                w.state = "validation_pending"
+            elif lease.kind == "revision":
+                # Reopen the revision round rather than treating it as a fresh "queued" item:
+                # the affinity window (see iteration.route()) still applies to whoever picks
+                # it up next.
+                w.state = "revision_requested"
+                submission = s.scalar(select(Submission).where(Submission.work_id == w.id))
+                if submission and submission.state == "revising":
+                    submission.state = "changes_requested"
+                    submission.updated = self.clock()
+            else:
+                w.state = "queued"
         audit(s, w.project_id, lease.user_id, "allocation." + terminal, lease_id=lease.id)
 
     def sweep(self, s):
@@ -338,6 +436,28 @@ class Coordinator:
                     w,
                     "The 12-hour recovery window expired. The old lease is fenced out; "
                     "checkpoint history is preserved.",
+                )
+        from co4 import iteration  # local import: co4.iteration imports co4.domain
+
+        for w in s.scalars(select(Work).where(Work.state == "revision_requested")):
+            submission = s.scalar(select(Submission).where(Submission.work_id == w.id))
+            if not submission or submission.state != "changes_requested":
+                continue
+            p = get(s, Project, w.project_id)
+            policy = Policy(**p.policy)
+            if now - submission.updated < policy.revision_affinity_seconds:
+                continue
+            # The affinity window (original contributor, then an @-mentioned member) has fully
+            # elapsed. If nobody at all could pick this up via the normal pool either, it would
+            # otherwise sit "queued" forever; escalate instead.
+            if not iteration.any_device_eligible(s, self, w):
+                iteration.escalate(
+                    s,
+                    p,
+                    w,
+                    submission,
+                    reason="No eligible device available after the revision affinity window "
+                    "expired",
                 )
 
     def stale(self, lease: Lease) -> bool:
@@ -395,7 +515,18 @@ class Coordinator:
         if lease.phase != "ready":
             fail(409, "Complete all workflow phases before requesting review")
         e = payload.evidence
-        if (e.baseline_exit, e.red_exit, e.green_exit, e.verify_exit) != (0, 1, 0, 0):
+        if lease.kind == "revision":
+            # A revision round need not reproduce a fresh red phase -- the regression may
+            # already be covered, or the fix may not need one -- but baseline/green/verify
+            # must still pass, and if red did run it must still have failed first.
+            red_ok = e.red_exit in (None, 1)
+            if e.baseline_exit != 0 or e.green_exit != 0 or e.verify_exit != 0 or not red_ok:
+                fail(
+                    422,
+                    "Required evidence for a revision: passing baseline, an optional failing "
+                    "regression test, passing implementation, passing verification",
+                )
+        elif (e.baseline_exit, e.red_exit, e.green_exit, e.verify_exit) != (0, 1, 0, 0):
             fail(
                 422,
                 "Required evidence: passing baseline, failing test, passing implementation, "
@@ -439,7 +570,11 @@ class Coordinator:
             s,
             w,
             "Implementation and test evidence are ready. No PR has been created. The "
-            "contributor must review and approve the exact commit.",
+            "contributor must review and approve the exact commit."
+            if lease.kind != "revision"
+            else "Revision evidence is ready. The existing PR has not been updated yet. The "
+            "contributor must review and approve the exact commit before the App fast-forwards "
+            "the submission branch.",
         )
 
     def approve(self, s, lease: Lease, user_id: str, payload):
@@ -472,13 +607,14 @@ class Coordinator:
         if lease.approved_sha and (not policy.require_maintainer_approval or lease.maintainer_sha):
             lease.state = "publishing"
             w.state = "publishing"
-            key = f"publish:{lease.id}:{payload.sha}"
+            kind = "update_submission" if lease.kind == "revision" else "publish"
+            key = f"{kind}:{lease.id}:{payload.sha}"
             if not s.scalar(select(Outbox).where(Outbox.key == key)):
                 s.add(
                     Outbox(
                         key=key,
                         project_id=p.id,
-                        kind="publish",
+                        kind=kind,
                         payload={"lease_id": lease.id, "sha": payload.sha},
                     )
                 )

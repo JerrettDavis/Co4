@@ -227,7 +227,11 @@ def test_github_publish_is_draft_sha_frozen_and_idempotent(app, monkeypatch):
             assert data["draft"] and data["head"].startswith("co4/submission/")
             assert data["maintainer_can_modify"] is False
             state["created"] += 1
-            state["pr"] = {"html_url": "https://github.com/acme/repo/pull/1", "head": {"sha": sha}}
+            state["pr"] = {
+                "html_url": "https://github.com/acme/repo/pull/1",
+                "number": 1,
+                "head": {"sha": sha},
+            }
             return httpx.Response(201, json=state["pr"])
         raise AssertionError(str(req.url))
 
@@ -239,6 +243,9 @@ def test_github_publish_is_draft_sha_frozen_and_idempotent(app, monkeypatch):
         "default_branch": "main",
     }
     result = gh.publish(project, "lease", sha, 41, "Fix empty average", "Evidence")
+    assert result["url"] == "https://github.com/acme/repo/pull/1"
+    assert result["number"] == 1
+    assert result["branch"].startswith("co4/submission/")
     assert (
         gh.publish(project, "lease", sha, 41, "Fix empty average", "Evidence") == result
         and state["created"] == 1

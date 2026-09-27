@@ -224,9 +224,17 @@ class GitHub:
         return ""
 
     def status_comment(self, project: dict, number: int, work_id: str, body: str) -> None:
+        self._upsert_comment(project, number, f"<!-- co4:work:{work_id} -->", body)
+
+    def pr_comment(self, project: dict, number: int, marker: str, body: str) -> None:
+        """Maintainer-facing comment on a submission PR (PRs share the issues comment API).
+        `marker` identifies one logical comment (e.g. one per revision round) so retries edit
+        it instead of posting duplicates."""
+        self._upsert_comment(project, number, f"<!-- {marker} -->", body)
+
+    def _upsert_comment(self, project: dict, number: int, marker: str, body: str) -> None:
         access = self.app_token(project["installation_id"], project["repository_id"])
         root = f"/repos/{project['repository']}"
-        marker = f"<!-- co4:work:{work_id} -->"
         # Reconcile before write, so retries do not produce a comment per heartbeat.
         for page in range(1, 101):
             comments = self.request(
@@ -252,10 +260,24 @@ class GitHub:
             "POST", f"{root}/issues/{number}/comments", access, json={"body": marker + "\n" + body}
         )
 
+    def add_label(self, project: dict, number: int, label: str) -> None:
+        access = self.app_token(project["installation_id"], project["repository_id"])
+        self.request(
+            "POST",
+            f"/repos/{project['repository']}/issues/{number}/labels",
+            access,
+            json={"labels": [label]},
+        )
+
     def publish(
         self, project: dict, lease_id: str, sha: str, number: int, title: str, body: str
-    ) -> str:
-        """Publish from an App-created snapshot branch, not the worker's moving work branch."""
+    ) -> dict:
+        """Publish from an App-created snapshot branch, not the worker's moving work branch.
+
+        Returns {"url": html_url, "number": pr_number, "branch": head_branch}. The branch is
+        returned (rather than recomputed by the caller) so the outbox can record it verbatim
+        as Submission.head_branch.
+        """
         access = self.app_token(project["installation_id"], project["repository_id"])
         root = f"/repos/{project['repository']}"
         branch = f"co4/submission/{lease_id}/{sha[:12]}"
@@ -285,7 +307,11 @@ class GitHub:
         if existing:
             if existing[0]["head"]["sha"] != sha:
                 raise GitHubError("Existing PR does not match approved SHA")
-            return existing[0]["html_url"]
+            return {
+                "url": existing[0]["html_url"],
+                "number": existing[0]["number"],
+                "branch": branch,
+            }
         created = self.request(
             "POST",
             f"{root}/pulls",
@@ -299,7 +325,19 @@ class GitHub:
                 "maintainer_can_modify": False,
             },
         ).json()
-        return created["html_url"]
+        return {"url": created["html_url"], "number": created["number"], "branch": branch}
+
+    def update_submission_branch(self, project: dict, branch: str, sha: str) -> None:
+        """Fast-forward the existing, App-owned submission branch to a new human-approved
+        revision commit. The PR itself is never touched -- only this ref moves, and always as
+        a fast-forward (force=false) from the previously approved commit."""
+        access = self.app_token(project["installation_id"], project["repository_id"])
+        self.request(
+            "PATCH",
+            f"/repos/{project['repository']}/git/refs/heads/{branch}",
+            access,
+            json={"sha": sha, "force": False},
+        )
 
     def issues(self, project: dict) -> list:
         access = self.app_token(project["installation_id"], project["repository_id"])
@@ -322,6 +360,11 @@ class DemoGitHub:
     def __init__(self):
         self.comments = []
         self.publications = []
+        self.labels_added = []
+        self.branch_updates = []
+        # marker -> (pr number, body); upserted by marker like the real gateway.
+        self.pr_comments = {}
+        self._next_pr_number = 500
 
     def inspect_checkpoint(self, project, checkpoint, *, with_diff=False):
         return ""  # Demo complete keeps the fixture diff supplied by the deterministic worker.
@@ -329,6 +372,31 @@ class DemoGitHub:
     def status_comment(self, project, number, work_id, body):
         self.comments.append((number, body))
 
+    def pr_comment(self, project, number, marker, body):
+        self.pr_comments[marker] = (number, body)
+
+    def add_label(self, project, number, label):
+        self.labels_added.append((number, label))
+
     def publish(self, project, lease_id, sha, number, title, body):
-        self.publications.append({"lease_id": lease_id, "sha": sha, "body": body})
-        return f"/demo/submissions/{lease_id}"
+        branch = f"co4/submission/{lease_id}/{sha[:12]}"
+        for existing in self.publications:
+            if existing["branch"] == branch:
+                return {"url": existing["url"], "number": existing["number"], "branch": branch}
+        pr_number = self._next_pr_number
+        self._next_pr_number += 1
+        url = f"/demo/submissions/{lease_id}"
+        self.publications.append(
+            {
+                "lease_id": lease_id,
+                "sha": sha,
+                "body": body,
+                "branch": branch,
+                "url": url,
+                "number": pr_number,
+            }
+        )
+        return {"url": url, "number": pr_number, "branch": branch}
+
+    def update_submission_branch(self, project, branch, sha):
+        self.branch_updates.append({"branch": branch, "sha": sha})

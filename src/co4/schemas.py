@@ -4,6 +4,12 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+RevisionTrigger = Literal["changes_requested", "revise_comment", "ci_failure"]
+
+
+def _default_revision_triggers() -> list[RevisionTrigger]:
+    return ["changes_requested", "revise_comment"]
+
 
 class Strict(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -43,6 +49,11 @@ class Policy(Strict):
     test_profile: str = Field(default="default", pattern=r"^[A-Za-z0-9_-]{1,50}$")
     prompt_notes: str = Field(default="", max_length=10_000)
     strategy: Literal["priority_age", "fifo"] = "priority_age"
+    max_revision_rounds: int = Field(default=3, ge=1, le=20)
+    # Matches the existing 12h same-user handover window (Settings.recovery_seconds); how long
+    # the original contributor of a submission keeps first refusal on its revision leases.
+    revision_affinity_seconds: int = Field(default=43200, ge=0, le=30 * 24 * 3600)
+    revision_triggers: list[RevisionTrigger] = Field(default_factory=_default_revision_triggers)
 
 
 class EnrollProject(Strict):
@@ -119,7 +130,9 @@ class Evidence(Strict):
         "structured_events"
     )
     baseline_exit: int = 0
-    red_exit: int = 1
+    # None only for a revision lease that legitimately skipped the (optional) red phase; an
+    # initial lease must always supply 1 here (see Coordinator.complete).
+    red_exit: int | None = 1
     green_exit: int = 0
     verify_exit: int = 0
     spec_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")

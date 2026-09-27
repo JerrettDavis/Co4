@@ -128,6 +128,34 @@ class Lease(Base):
     dib_expires: Mapped[float | None] = mapped_column(Float, nullable=True)
     pr_url: Mapped[str] = mapped_column(String(500), default="")
     error: Mapped[str] = mapped_column(Text, default="")
+    # PR review iteration: "initial" leases are the fixed baseline->verify workflow that can
+    # publish a PR; "revision" leases are built on top of an already-published submission, in
+    # response to reviewer feedback, and route through update_submission instead of publish.
+    kind: Mapped[str] = mapped_column(String(20), default="initial")
+    parent_lease_id: Mapped[str | None] = mapped_column(ForeignKey("leases.id"), nullable=True)
+    round: Mapped[int] = mapped_column(default=1)
+    # Untrusted reviewer-authored content (review body/comment text); redact like issue bodies
+    # before it ever reaches a prompt.
+    feedback: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class Submission(Base):
+    """One row per published PR. Tracks the App-owned, frozen submission branch and the review
+    iteration state machine layered on top of it (see co4.iteration)."""
+
+    __tablename__ = "submissions"
+    __table_args__ = (UniqueConstraint("project_id", "pr_number"),)
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=uid)
+    work_id: Mapped[str] = mapped_column(ForeignKey("work.id"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    pr_number: Mapped[int] = mapped_column()
+    head_branch: Mapped[str] = mapped_column(String(300))
+    expected_head_sha: Mapped[str] = mapped_column(String(40))
+    round: Mapped[int] = mapped_column(default=1)
+    state: Mapped[str] = mapped_column(String(30), default="open")
+    last_review_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created: Mapped[float] = mapped_column(default=time.time)
+    updated: Mapped[float] = mapped_column(default=time.time)
 
 
 class Decline(Base):

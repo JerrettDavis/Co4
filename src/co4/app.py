@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy import select
 
+from co4 import iteration
 from co4.config import Settings, is_loopback_url
 from co4.db import Database
 from co4.domain import (
@@ -30,6 +31,7 @@ from co4.domain import (
     project_data,
     public_receipt,
     status,
+    submission_data,
     visible,
     work_data,
 )
@@ -47,6 +49,7 @@ from co4.models import (
     Outbox,
     Project,
     Session,
+    Submission,
     User,
     Work,
 )
@@ -568,7 +571,7 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
     @app.get("/api/dashboard")
     def dashboard(u=Depends(user)):  # noqa: B008
         with database.read() as s:
-            projects, works, leases = [], [], []
+            projects, works, leases, submissions = [], [], [], []
             for p in s.scalars(select(Project).order_by(Project.repository)):
                 if not visible(s, p, u.id):
                     continue
@@ -589,6 +592,10 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
                         data = lease_data(s, lease)
                         data["stale"] = coordinator.stale(lease)
                         leases.append(data)
+                submissions.extend(
+                    submission_data(s, sub)
+                    for sub in s.scalars(select(Submission).where(Submission.project_id == p.id))
+                )
             devices = [
                 {
                     k: getattr(d, k)
@@ -609,6 +616,7 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
                 "projects": projects,
                 "work": works,
                 "leases": leases,
+                "submissions": submissions,
                 "devices": devices,
                 "user": {"id": u.id, "login": u.login},
             }
@@ -778,7 +786,13 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
                 data["stale"] = coordinator.stale(lease)
                 data["receipt"] = public_receipt(lease)
                 history.append(data)
-            return {"work": work_data(w), "project": project_data(p), "leases": history}
+            sub = s.scalar(select(Submission).where(Submission.work_id == w.id))
+            return {
+                "work": work_data(w),
+                "project": project_data(p),
+                "leases": history,
+                "submission": submission_data(s, sub) if sub else None,
+            }
 
     @app.post("/api/work/{work_id}/validate")
     def validate_work(work_id: str, u=Depends(user)):  # noqa: B008
@@ -1151,6 +1165,51 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
                     pd["repository"],
                     payload["sender"]["login"],
                 )
+        # Reviewer permission for PR review iteration is checked the same way as the ready
+        # label above: via can_manage, on the sender who actually triggered the event, never on
+        # a co4 Member row (a reviewer need not ever have logged into Co4). Also never trust an
+        # event authored by our own App bot -- that would be a self-triggered loop.
+        app_bot = (cfg.app_slug + "[bot]") if cfg.app_slug else None
+        revision_permitted = False
+        # Set alongside revision_permitted whenever the event structurally qualifies as a
+        # revision trigger and a real can_manage check ran -- as opposed to revision_permitted
+        # staying False just because cfg.demo skipped the check, or the event/sender didn't
+        # match at all. Lets the handlers below tell "denied" apart from "not applicable" so a
+        # genuine permission denial can be audited instead of silently doing nothing.
+        revision_check_attempted = False
+        if (
+            pd
+            and kind == "pull_request_review"
+            and action == "submitted"
+            and payload.get("review", {}).get("state") in {"changes_requested", "approved"}
+            and payload.get("review", {}).get("user", {}).get("login") != app_bot
+            and not cfg.demo
+        ):
+            revision_check_attempted = True
+            revision_permitted = await asyncio.to_thread(
+                gateway.can_manage,  # type: ignore[union-attr]
+                installation,
+                pd["repository_id"],
+                pd["repository"],
+                payload["review"]["user"]["login"],
+            )
+        elif (
+            pd
+            and kind == "issue_comment"
+            and action == "created"
+            and "pull_request" in payload.get("issue", {})
+            and payload.get("comment", {}).get("body", "").strip().startswith("/co4 revise")
+            and payload.get("sender", {}).get("login") != app_bot
+            and not cfg.demo
+        ):
+            revision_check_attempted = True
+            revision_permitted = await asyncio.to_thread(
+                gateway.can_manage,  # type: ignore[union-attr]
+                installation,
+                pd["repository_id"],
+                pd["repository"],
+                payload["sender"]["login"],
+            )
         with database.transaction() as s:
             if s.get(Delivery, delivery):
                 return {"duplicate": True}
@@ -1191,7 +1250,11 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
                 ):
                     fail(400, "Issue payload is incomplete")
                 ingest_issue(s, p, issue, trusted_ready, action)
-            elif kind == "issue_comment" and action == "created":
+            elif (
+                kind == "issue_comment"
+                and action == "created"
+                and "pull_request" not in payload.get("issue", {})
+            ):
                 text = payload.get("comment", {}).get("body", "").strip()
                 if text.startswith("/co4 "):
                     identity = s.scalar(
@@ -1230,38 +1293,203 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
                                 )
                         except (HTTPException, ValueError):
                             audit(s, p.id, identity.id, "github_command.denied", work_id=w.id)
+            elif (
+                kind == "issue_comment"
+                and action == "created"
+                and "pull_request" in payload.get("issue", {})
+            ):
+                text = payload.get("comment", {}).get("body", "").strip()
+                if text.startswith("/co4 revise"):
+                    submission = s.scalar(
+                        select(Submission).where(
+                            Submission.project_id == p.id,
+                            Submission.pr_number == payload.get("issue", {}).get("number", -1),
+                        )
+                    )
+                    if submission:
+                        w = get(s, Work, submission.work_id)
+                        if revision_permitted:
+                            outcome = iteration.request_revision(
+                                s,
+                                coordinator,
+                                p,
+                                w,
+                                submission,
+                                review_id=f"comment:{payload.get('comment', {}).get('id')}",
+                                trigger="revise_comment",
+                                feedback_text=text,
+                                reviewer_login=payload.get("sender", {}).get("login", ""),
+                                # issue_comment payloads carry no PR head SHA; outdated-head
+                                # filtering only applies to pull_request_review, which does.
+                                head_sha=None,
+                            )
+                            # "escalated" already gets its own detailed audit entry from
+                            # iteration.escalate(); every other non-"requested" outcome is
+                            # otherwise a silent no-op, so record why this comment produced no
+                            # visible action.
+                            if outcome not in {"requested", "escalated"}:
+                                audit(
+                                    s,
+                                    p.id,
+                                    "github",
+                                    "revision.request_ignored",
+                                    work_id=w.id,
+                                    trigger="revise_comment",
+                                    outcome=outcome,
+                                )
+                        elif revision_check_attempted:
+                            # Sender lacks can_manage: same denial shape as the /co4
+                            # validate|approve|recover path above.
+                            audit(
+                                s,
+                                p.id,
+                                "github",
+                                "github_command.denied",
+                                work_id=w.id,
+                                trigger="revise_comment",
+                            )
+            elif kind == "pull_request_review" and action == "submitted":
+                review = payload.get("review", {})
+                if review.get("state") == "approved":
+                    submission = s.scalar(
+                        select(Submission).where(
+                            Submission.project_id == p.id,
+                            Submission.pr_number
+                            == payload.get("pull_request", {}).get("number", -1),
+                        )
+                    )
+                    if submission:
+                        if revision_permitted:
+                            iteration.review_approved(
+                                s,
+                                get(s, Work, submission.work_id),
+                                submission,
+                                head_sha=review.get("commit_id"),
+                            )
+                        elif revision_check_attempted:
+                            audit(
+                                s,
+                                p.id,
+                                "github",
+                                "github_command.denied",
+                                work_id=submission.work_id,
+                                trigger="approved",
+                            )
+                elif review.get("state") == "changes_requested":
+                    pr = payload.get("pull_request", {})
+                    submission = s.scalar(
+                        select(Submission).where(
+                            Submission.project_id == p.id,
+                            Submission.pr_number == pr.get("number", -1),
+                        )
+                    )
+                    if submission:
+                        w = get(s, Work, submission.work_id)
+                        if revision_permitted:
+                            outcome = iteration.request_revision(
+                                s,
+                                coordinator,
+                                p,
+                                w,
+                                submission,
+                                review_id=f"review:{review.get('id')}",
+                                trigger="changes_requested",
+                                feedback_text=review.get("body") or "",
+                                reviewer_login=review.get("user", {}).get("login", ""),
+                                head_sha=review.get("commit_id"),
+                            )
+                            # See the /co4 revise comment handler above: "escalated" audits
+                            # itself, every other non-"requested" outcome would otherwise be a
+                            # silent no-op.
+                            if outcome not in {"requested", "escalated"}:
+                                audit(
+                                    s,
+                                    p.id,
+                                    "github",
+                                    "revision.request_ignored",
+                                    work_id=w.id,
+                                    trigger="changes_requested",
+                                    outcome=outcome,
+                                )
+                        elif revision_check_attempted:
+                            audit(
+                                s,
+                                p.id,
+                                "github",
+                                "github_command.denied",
+                                work_id=w.id,
+                                trigger="changes_requested",
+                            )
             elif kind == "pull_request":
                 pr = payload.get("pull_request", {})
-                branch = pr.get("head", {}).get("ref", "")
-                for lease in s.scalars(
-                    select(Lease)
-                    .join(Work, Lease.work_id == Work.id)
-                    .where(Work.project_id == p.id)
-                ):
-                    if branch == f"co4/submission/{lease.id}/{lease.approved_sha[:12]}":
-                        w = get(s, Work, lease.work_id)
-                        if (
-                            action == "synchronize"
-                            and pr.get("head", {}).get("sha") != lease.approved_sha
-                        ):
-                            lease.error = (
-                                "PR head changed after approval. Fresh review is required."
+                submission = s.scalar(
+                    select(Submission).where(
+                        Submission.project_id == p.id,
+                        Submission.pr_number == pr.get("number", -1),
+                    )
+                )
+                if submission:
+                    w = get(s, Work, submission.work_id)
+                    active = get(s, Lease, w.active_lease) if w.active_lease else None
+                    head_sha = pr.get("head", {}).get("sha", "")
+                    # The App's own fast-forward can be delivered before the outbox transaction
+                    # that records the new expected head commits: accept the exact commit the
+                    # in-flight, human-approved revision lease is publishing, too.
+                    in_flight = bool(
+                        active
+                        and active.kind == "revision"
+                        and active.state == "publishing"
+                        and head_sha
+                        and head_sha == active.approved_sha
+                    )
+                    if action == "synchronize":
+                        if head_sha and (head_sha == submission.expected_head_sha or in_flight):
+                            # Expected fast-forward: our own initial publish or an
+                            # App-fast-forwarded, human-approved revision. Nothing to invalidate.
+                            submission.updated = time.time()
+                        else:
+                            iteration.escalate(
+                                s,
+                                p,
+                                w,
+                                submission,
+                                reason="The PR head moved to a commit Co4 did not publish, so "
+                                "the execution receipt no longer attests to it",
                             )
-                            lease.state, w.state = "review_invalidated", "review_invalidated"
-                            audit(s, p.id, "github", "review.invalidated", lease_id=lease.id)
+                            if active:
+                                active.error = (
+                                    "PR head changed after approval. Fresh review is required."
+                                )
+                                active.state = w.state = "review_invalidated"
+                            audit(
+                                s,
+                                p.id,
+                                "github",
+                                "review.invalidated",
+                                work_id=w.id,
+                                pr_number=submission.pr_number,
+                            )
                             status(
                                 s,
                                 w,
-                                "The PR head changed after approval. The previous execution "
+                                "The PR head changed unexpectedly. The previous execution "
                                 "receipt no longer attests to the PR head; a fresh review is "
                                 "required.",
                             )
-                        elif action == "closed":
-                            lease.state = "merged" if pr.get("merged") else "closed"
-                            w.state = lease.state
-                            audit(
-                                s, p.id, "github", "pull_request." + lease.state, lease_id=lease.id
-                            )
+                    elif action == "closed":
+                        submission.state = "merged" if pr.get("merged") else "closed"
+                        submission.updated = time.time()
+                        w.state = submission.state
+                        if active:
+                            active.state = submission.state
+                        audit(
+                            s,
+                            p.id,
+                            "github",
+                            "pull_request." + submission.state,
+                            work_id=w.id,
+                            pr_number=submission.pr_number,
+                        )
             return {"accepted": True}
 
     static = Path(__file__).parent / "static"

@@ -86,11 +86,28 @@ class Repository:
         *,
         local_source: str | None = None,
         handover: dict | None = None,
+        base: dict | None = None,
+        base_source: str | None = None,
     ):
+        """Clone `upstream` and create the allocated work branch.
+
+        By default the work branch starts fresh on `default_branch` (an optional `handover`
+        checkpoint is only kept alongside, for reference). A revision lease instead passes
+        `base` ({"repository", "sha"}): the human-approved commit already submitted as a PR.
+        The work branch then starts *at* that commit, so the result can later be
+        fast-forwarded onto the frozen submission branch. `base_source` (demo only) is a local
+        repository path to fetch the base commit from instead of GitHub.
+        """
         if not REPO_PATTERN.fullmatch(upstream) or not REPO_PATTERN.fullmatch(push_repository):
             raise GitError("Invalid GitHub repository name")
         if not branch.startswith("co4/work/"):
             raise GitError("Work branch is outside the allocated namespace")
+        if base is not None:
+            if not REPO_PATTERN.fullmatch(base.get("repository", "")) or not re.fullmatch(
+                r"[a-f0-9]{40}", base.get("sha", "")
+            ):
+                raise GitError("Invalid revision base commit")
+            handover = None  # A revision's handover *is* its base; nothing separate to keep.
         self.path.parent.mkdir(parents=True, exist_ok=True)
         source = (
             local_source if self.demo and local_source else f"https://github.com/{upstream}.git"
@@ -107,7 +124,18 @@ class Repository:
             str(self.path),
             cwd=self.path.parent,
         )
-        self.command("checkout", "-b", branch)
+        if base is not None:
+            fetch_from = (
+                base_source
+                if self.demo and base_source
+                else f"https://github.com/{base['repository']}.git"
+            )
+            self.command("fetch", "--no-tags", "--", fetch_from, base["sha"])
+            if self.command("rev-parse", "FETCH_HEAD") != base["sha"]:
+                raise GitError("Fetched revision base does not match the approved commit")
+            self.command("checkout", "-b", branch, base["sha"])
+        else:
+            self.command("checkout", "-b", branch)
         # Worktrees preserve replayable handover history but start fresh evidence on upstream
         # baseline.
         if handover and not self.demo:
