@@ -47,6 +47,7 @@ from co4.models import (
     Outbox,
     Project,
     Session,
+    Submission,
     User,
     Work,
 )
@@ -1232,36 +1233,58 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
                             audit(s, p.id, identity.id, "github_command.denied", work_id=w.id)
             elif kind == "pull_request":
                 pr = payload.get("pull_request", {})
-                branch = pr.get("head", {}).get("ref", "")
-                for lease in s.scalars(
-                    select(Lease)
-                    .join(Work, Lease.work_id == Work.id)
-                    .where(Work.project_id == p.id)
-                ):
-                    if branch == f"co4/submission/{lease.id}/{lease.approved_sha[:12]}":
-                        w = get(s, Work, lease.work_id)
-                        if (
-                            action == "synchronize"
-                            and pr.get("head", {}).get("sha") != lease.approved_sha
-                        ):
-                            lease.error = (
-                                "PR head changed after approval. Fresh review is required."
+                submission = s.scalar(
+                    select(Submission).where(
+                        Submission.project_id == p.id,
+                        Submission.pr_number == pr.get("number", -1),
+                    )
+                )
+                if submission:
+                    w = get(s, Work, submission.work_id)
+                    active = get(s, Lease, w.active_lease) if w.active_lease else None
+                    head_sha = pr.get("head", {}).get("sha", "")
+                    if action == "synchronize":
+                        if head_sha and head_sha == submission.expected_head_sha:
+                            # Expected fast-forward: our own initial publish or an
+                            # App-fast-forwarded, human-approved revision. Nothing to invalidate.
+                            submission.updated = time.time()
+                        else:
+                            submission.state = "escalated"
+                            submission.updated = time.time()
+                            if active:
+                                active.error = (
+                                    "PR head changed after approval. Fresh review is required."
+                                )
+                                active.state = w.state = "review_invalidated"
+                            audit(
+                                s,
+                                p.id,
+                                "github",
+                                "review.invalidated",
+                                work_id=w.id,
+                                pr_number=submission.pr_number,
                             )
-                            lease.state, w.state = "review_invalidated", "review_invalidated"
-                            audit(s, p.id, "github", "review.invalidated", lease_id=lease.id)
                             status(
                                 s,
                                 w,
-                                "The PR head changed after approval. The previous execution "
+                                "The PR head changed unexpectedly. The previous execution "
                                 "receipt no longer attests to the PR head; a fresh review is "
                                 "required.",
                             )
-                        elif action == "closed":
-                            lease.state = "merged" if pr.get("merged") else "closed"
-                            w.state = lease.state
-                            audit(
-                                s, p.id, "github", "pull_request." + lease.state, lease_id=lease.id
-                            )
+                    elif action == "closed":
+                        submission.state = "merged" if pr.get("merged") else "closed"
+                        submission.updated = time.time()
+                        w.state = submission.state
+                        if active:
+                            active.state = submission.state
+                        audit(
+                            s,
+                            p.id,
+                            "github",
+                            "pull_request." + submission.state,
+                            work_id=w.id,
+                            pr_number=submission.pr_number,
+                        )
             return {"accepted": True}
 
     static = Path(__file__).parent / "static"

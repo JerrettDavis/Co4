@@ -6,7 +6,7 @@ import uuid
 from sqlalchemy import delete, select
 
 from co4.domain import audit, get, pr_body, project_data, status
-from co4.models import Event, Lease, OAuthState, Outbox, Project, Session, Work
+from co4.models import Event, Lease, OAuthState, Outbox, Project, Session, Submission, Work
 from co4.security import redact
 
 
@@ -93,7 +93,7 @@ class Dispatcher:
                 )
             else:
                 valid = p.active
-        result = ""
+        result = None
         if valid:
             if kind == "status":
                 link = self.coordinator.settings.public_url + "/#work/" + payload["work_id"]
@@ -114,7 +114,7 @@ class Dispatcher:
                 lease = get(s, Lease, payload["lease_id"])
                 w = get(s, Work, lease.work_id)
                 # Record external reality even if cancellation raced with the HTTP request.
-                lease.pr_url = result
+                lease.pr_url = result["url"]
                 if lease.state == "publishing" and w.active_lease == lease.id:
                     lease.state = "submitted"
                     lease.error = ""
@@ -124,6 +124,21 @@ class Dispatcher:
                     lease.error = (
                         "PR creation raced with a policy change. Maintainer intervention required."
                     )
+                submission = s.scalar(
+                    select(Submission).where(
+                        Submission.project_id == p.id, Submission.pr_number == result["number"]
+                    )
+                )
+                if not submission:
+                    s.add(
+                        Submission(
+                            work_id=w.id,
+                            project_id=p.id,
+                            pr_number=result["number"],
+                            head_branch=result["branch"],
+                            expected_head_sha=payload["sha"],
+                        )
+                    )
                 audit(
                     s,
                     p.id,
@@ -131,7 +146,8 @@ class Dispatcher:
                     "pull_request.created",
                     lease_id=lease.id,
                     sha=payload["sha"],
-                    url=result,
+                    url=result["url"],
+                    number=result["number"],
                 )
                 status(
                     s,

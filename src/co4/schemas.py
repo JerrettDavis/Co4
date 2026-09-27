@@ -4,6 +4,12 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+RevisionTrigger = Literal["changes_requested", "revise_comment", "ci_failure"]
+
+
+def _default_revision_triggers() -> list[RevisionTrigger]:
+    return ["changes_requested", "revise_comment"]
+
 
 class Strict(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -47,9 +53,7 @@ class Policy(Strict):
     # Matches the existing 12h same-user handover window (Settings.recovery_seconds); how long
     # the original contributor of a submission keeps first refusal on its revision leases.
     revision_affinity_seconds: int = Field(default=43200, ge=0, le=30 * 24 * 3600)
-    revision_triggers: list[Literal["changes_requested", "revise_comment", "ci_failure"]] = (
-        Field(default_factory=lambda: ["changes_requested", "revise_comment"])
-    )
+    revision_triggers: list[RevisionTrigger] = Field(default_factory=_default_revision_triggers)
 
 
 class EnrollProject(Strict):
