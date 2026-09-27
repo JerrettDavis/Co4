@@ -11,6 +11,8 @@ its pytest assertions exercise one code path.
 | `contribution.feature` | `tests/test_bdd_contribution.py` | All 5 scenarios run on every platform. |
 | `interactive.feature` | `tests/test_bdd_interactive.py` | The native-terminal outline (claude/codex/copilot) and *Stop and recover* use a real POSIX PTY and are skipped on Windows (run them in WSL/Linux CI). *Do not silently switch…*, *Do not invent accounting…* and *Preserve existing configurations…* replace only the PTY relay with a simulated native CLI and run everywhere. |
 | `device-flow.feature` | `tests/test_bdd_device_flow.py` | GitHub is simulated at the HTTP boundary with `httpx.MockTransport`; the real `co4.github.GitHub` gateway runs. |
+| `iteration.feature` | `tests/test_bdd_iteration.py` | Review-webhook guards (permission, dedup, outdated head, one open round, round limit). `DemoGitHub` with a stubbed `can_manage`. |
+| `review-iteration.feature` | `tests/test_bdd_review_iteration.py` | Full loop with the real worker (fixture harness, real Git/tests): changes requested → revision lease → approval → fast-forward → re-review → merge, and round-limit escalation. |
 
 Run only the executable specifications with `pytest tests/test_bdd_*.py`.
 
@@ -28,6 +30,7 @@ Run only the executable specifications with `pytest tests/test_bdd_*.py`.
 | HMAC, delivery replay, OAuth, issue changes and App removal | `test_integrations.py` |
 | App-controlled draft SHA, remote checkpoint and outbox retries | `test_integrations.py` |
 | GitHub device-flow endpoints, HttpOnly session cookie, loopback HTTP serve mode | `test_device_flow.py`, `device-flow.feature` |
+| PR review iteration: routing, revision evidence, worker revision mode, escalation, UI data | `test_iteration_*.py`, `test_worker_revision.py`, `test_submission_lookup.py`, `iteration.feature`, `review-iteration.feature` |
 | GitHub base-URL test seam (`CO4_GITHUB_URL`, `CO4_GITHUB_API_URL`) | `test_github_urls.py` |
 | Maintainer and contributor UI workflow (browser) | `scripts/browser_smoke.py` (CI `browser` job) |
 | Device-flow sign-in UI transition, HttpOnly cookie invisible to `document.cookie`, denied/expired/cancel (browser) | `scripts/device_flow_e2e.py` (CI `browser` job) |
