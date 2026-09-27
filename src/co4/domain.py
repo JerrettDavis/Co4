@@ -113,6 +113,10 @@ def lease_data(s, lease: Lease, *, detail: bool = False) -> dict:
             "dib_expires",
             "pr_url",
             "error",
+            "kind",
+            "parent_lease_id",
+            "round",
+            "feedback",
         )
     }
     result["contributor"] = get(s, User, lease.user_id).login
@@ -478,7 +482,18 @@ class Coordinator:
         if lease.phase != "ready":
             fail(409, "Complete all workflow phases before requesting review")
         e = payload.evidence
-        if (e.baseline_exit, e.red_exit, e.green_exit, e.verify_exit) != (0, 1, 0, 0):
+        if lease.kind == "revision":
+            # A revision round need not reproduce a fresh red phase -- the regression may
+            # already be covered, or the fix may not need one -- but baseline/green/verify
+            # must still pass, and if red did run it must still have failed first.
+            red_ok = e.red_exit in (None, 1)
+            if e.baseline_exit != 0 or e.green_exit != 0 or e.verify_exit != 0 or not red_ok:
+                fail(
+                    422,
+                    "Required evidence for a revision: passing baseline, an optional failing "
+                    "regression test, passing implementation, passing verification",
+                )
+        elif (e.baseline_exit, e.red_exit, e.green_exit, e.verify_exit) != (0, 1, 0, 0):
             fail(
                 422,
                 "Required evidence: passing baseline, failing test, passing implementation, "
@@ -522,7 +537,11 @@ class Coordinator:
             s,
             w,
             "Implementation and test evidence are ready. No PR has been created. The "
-            "contributor must review and approve the exact commit.",
+            "contributor must review and approve the exact commit."
+            if lease.kind != "revision"
+            else "Revision evidence is ready. The existing PR has not been updated yet. The "
+            "contributor must review and approve the exact commit before the App fast-forwards "
+            "the submission branch.",
         )
 
     def approve(self, s, lease: Lease, user_id: str, payload):
@@ -555,13 +574,14 @@ class Coordinator:
         if lease.approved_sha and (not policy.require_maintainer_approval or lease.maintainer_sha):
             lease.state = "publishing"
             w.state = "publishing"
-            key = f"publish:{lease.id}:{payload.sha}"
+            kind = "update_submission" if lease.kind == "revision" else "publish"
+            key = f"{kind}:{lease.id}:{payload.sha}"
             if not s.scalar(select(Outbox).where(Outbox.key == key)):
                 s.add(
                     Outbox(
                         key=key,
                         project_id=p.id,
-                        kind="publish",
+                        kind=kind,
                         payload={"lease_id": lease.id, "sha": payload.sha},
                     )
                 )

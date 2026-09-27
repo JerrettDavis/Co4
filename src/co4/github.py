@@ -319,6 +319,18 @@ class GitHub:
         ).json()
         return {"url": created["html_url"], "number": created["number"], "branch": branch}
 
+    def update_submission_branch(self, project: dict, branch: str, sha: str) -> None:
+        """Fast-forward the existing, App-owned submission branch to a new human-approved
+        revision commit. The PR itself is never touched -- only this ref moves, and always as
+        a fast-forward (force=false) from the previously approved commit."""
+        access = self.app_token(project["installation_id"], project["repository_id"])
+        self.request(
+            "PATCH",
+            f"/repos/{project['repository']}/git/refs/heads/{branch}",
+            access,
+            json={"sha": sha, "force": False},
+        )
+
     def issues(self, project: dict) -> list:
         access = self.app_token(project["installation_id"], project["repository_id"])
         issues = []  # type: ignore[var-annotated]  # pre-existing, out of scope for #11
@@ -341,6 +353,7 @@ class DemoGitHub:
         self.comments = []
         self.publications = []
         self.labels_added = []
+        self.branch_updates = []
         self._next_pr_number = 500
 
     def inspect_checkpoint(self, project, checkpoint, *, with_diff=False):
@@ -371,3 +384,6 @@ class DemoGitHub:
             }
         )
         return {"url": url, "number": pr_number, "branch": branch}
+
+    def update_submission_branch(self, project, branch, sha):
+        self.branch_updates.append({"branch": branch, "sha": sha})

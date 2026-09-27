@@ -45,6 +45,9 @@ class Dispatcher:
                     if job.kind == "publish":
                         lease = get(s, Lease, job.payload["lease_id"])
                         lease.error = "Publication retry pending: " + job.error
+                    elif job.kind == "update_submission":
+                        lease = get(s, Lease, job.payload["lease_id"])
+                        lease.error = "Submission update retry pending: " + job.error
 
     def claim(self):
         with self.db.transaction() as s:
@@ -91,6 +94,20 @@ class Dispatcher:
                     w.title,
                     pr_body(lease, w.number),
                 )
+            elif kind == "update_submission":
+                lease = get(s, Lease, payload["lease_id"])
+                w = get(s, Work, lease.work_id)
+                submission = s.scalar(select(Submission).where(Submission.work_id == w.id))
+                valid = (
+                    p.active
+                    and lease.state == "publishing"
+                    and w.active_lease == lease.id
+                    and submission is not None
+                    and payload["sha"] == lease.approved_sha == lease.checkpoint.get("sha")
+                )
+                if p.policy.get("require_maintainer_approval"):
+                    valid = valid and lease.maintainer_sha == payload["sha"]
+                update_args = (submission.head_branch, payload["sha"]) if submission else None
             else:
                 valid = p.active
         result = None
@@ -105,6 +122,8 @@ class Dispatcher:
                 self.github.add_label(project, payload["number"], payload["label"])
             elif kind == "publish":
                 result = self.github.publish(project, *publish_args)
+            elif kind == "update_submission":
+                self.github.update_submission_branch(project, *update_args)
         with self.db.transaction() as s:
             job = get(s, Outbox, job_id)
             if job.lock_token != lock:
@@ -156,4 +175,36 @@ class Dispatcher:
                     w,
                     "A human-approved draft PR has been created. Independent CI and maintainer "
                     "review are still required.",
+                )
+            elif valid and kind == "update_submission":
+                lease = get(s, Lease, payload["lease_id"])
+                w = get(s, Work, lease.work_id)
+                submission = s.scalar(select(Submission).where(Submission.work_id == w.id))
+                if lease.state == "publishing" and w.active_lease == lease.id and submission:
+                    lease.state = "submitted"
+                    lease.error = ""
+                    w.state = "submitted"
+                    w.active_lease = None
+                    submission.expected_head_sha = payload["sha"]
+                    submission.round += 1
+                    submission.state = "awaiting_rereview"
+                    submission.updated = self.clock()
+                elif lease:
+                    lease.error = (
+                        "Submission update raced with a policy change. Maintainer intervention "
+                        "required."
+                    )
+                audit(
+                    s,
+                    p.id,
+                    "github-app",
+                    "submission.updated",
+                    lease_id=lease.id,
+                    sha=payload["sha"],
+                )
+                status(
+                    s,
+                    w,
+                    "The App fast-forwarded the existing PR to the new human-approved revision "
+                    "commit. The PR itself did not change. A fresh review is requested.",
                 )

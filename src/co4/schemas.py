@@ -130,7 +130,9 @@ class Evidence(Strict):
         "structured_events"
     )
     baseline_exit: int = 0
-    red_exit: int = 1
+    # None only for a revision lease that legitimately skipped the (optional) red phase; an
+    # initial lease must always supply 1 here (see Coordinator.complete).
+    red_exit: int | None = 1
     green_exit: int = 0
     verify_exit: int = 0
     spec_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
