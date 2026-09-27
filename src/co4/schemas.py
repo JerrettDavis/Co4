@@ -43,6 +43,13 @@ class Policy(Strict):
     test_profile: str = Field(default="default", pattern=r"^[A-Za-z0-9_-]{1,50}$")
     prompt_notes: str = Field(default="", max_length=10_000)
     strategy: Literal["priority_age", "fifo"] = "priority_age"
+    max_revision_rounds: int = Field(default=3, ge=1, le=20)
+    # Matches the existing 12h same-user handover window (Settings.recovery_seconds); how long
+    # the original contributor of a submission keeps first refusal on its revision leases.
+    revision_affinity_seconds: int = Field(default=43200, ge=0, le=30 * 24 * 3600)
+    revision_triggers: list[Literal["changes_requested", "revise_comment", "ci_failure"]] = (
+        Field(default_factory=lambda: ["changes_requested", "revise_comment"])
+    )
 
 
 class EnrollProject(Strict):
