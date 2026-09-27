@@ -1163,7 +1163,7 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
             pd
             and kind == "pull_request_review"
             and action == "submitted"
-            and payload.get("review", {}).get("state") == "changes_requested"
+            and payload.get("review", {}).get("state") in {"changes_requested", "approved"}
             and payload.get("review", {}).get("user", {}).get("login") != app_bot
             and not cfg.demo
         ):
@@ -1304,7 +1304,22 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
                         )
             elif kind == "pull_request_review" and action == "submitted":
                 review = payload.get("review", {})
-                if review.get("state") == "changes_requested" and revision_permitted:
+                if review.get("state") == "approved" and revision_permitted:
+                    submission = s.scalar(
+                        select(Submission).where(
+                            Submission.project_id == p.id,
+                            Submission.pr_number
+                            == payload.get("pull_request", {}).get("number", -1),
+                        )
+                    )
+                    if submission:
+                        iteration.review_approved(
+                            s,
+                            get(s, Work, submission.work_id),
+                            submission,
+                            head_sha=review.get("commit_id"),
+                        )
+                elif review.get("state") == "changes_requested" and revision_permitted:
                     pr = payload.get("pull_request", {})
                     submission = s.scalar(
                         select(Submission).where(
@@ -1338,14 +1353,30 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
                     w = get(s, Work, submission.work_id)
                     active = get(s, Lease, w.active_lease) if w.active_lease else None
                     head_sha = pr.get("head", {}).get("sha", "")
+                    # The App's own fast-forward can be delivered before the outbox transaction
+                    # that records the new expected head commits: accept the exact commit the
+                    # in-flight, human-approved revision lease is publishing, too.
+                    in_flight = bool(
+                        active
+                        and active.kind == "revision"
+                        and active.state == "publishing"
+                        and head_sha
+                        and head_sha == active.approved_sha
+                    )
                     if action == "synchronize":
-                        if head_sha and head_sha == submission.expected_head_sha:
+                        if head_sha and (head_sha == submission.expected_head_sha or in_flight):
                             # Expected fast-forward: our own initial publish or an
                             # App-fast-forwarded, human-approved revision. Nothing to invalidate.
                             submission.updated = time.time()
                         else:
-                            submission.state = "escalated"
-                            submission.updated = time.time()
+                            iteration.escalate(
+                                s,
+                                p,
+                                w,
+                                submission,
+                                reason="The PR head moved to a commit Co4 did not publish, so "
+                                "the execution receipt no longer attests to it",
+                            )
                             if active:
                                 active.error = (
                                     "PR head changed after approval. Fresh review is required."

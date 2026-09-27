@@ -132,9 +132,7 @@ class Lease(Base):
     # publish a PR; "revision" leases are built on top of an already-published submission, in
     # response to reviewer feedback, and route through update_submission instead of publish.
     kind: Mapped[str] = mapped_column(String(20), default="initial")
-    parent_lease_id: Mapped[str | None] = mapped_column(
-        ForeignKey("leases.id"), nullable=True
-    )
+    parent_lease_id: Mapped[str | None] = mapped_column(ForeignKey("leases.id"), nullable=True)
     round: Mapped[int] = mapped_column(default=1)
     # Untrusted reviewer-authored content (review body/comment text); redact like issue bodies
     # before it ever reaches a prompt.

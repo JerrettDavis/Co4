@@ -84,7 +84,9 @@ def submission_at_round_limit(app, clients, tmp_path, monkeypatch, ctx):
         sub = s.scalar(select(Submission).where(Submission.work_id == job["work"]["id"]))
         project = s.scalar(select(Project))
         policy = Policy(**project.policy)
-        sub.round = policy.max_revision_rounds
+        # round is the PR head version (1 = initial publish), so max_revision_rounds revisions
+        # already spent means round == max_revision_rounds + 1.
+        sub.round = policy.max_revision_rounds + 1
         number, sha = sub.pr_number, sub.expected_head_sha
     ctx.update(job=job, lease=lease, number=number, sha=sha)
 

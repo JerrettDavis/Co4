@@ -224,9 +224,17 @@ class GitHub:
         return ""
 
     def status_comment(self, project: dict, number: int, work_id: str, body: str) -> None:
+        self._upsert_comment(project, number, f"<!-- co4:work:{work_id} -->", body)
+
+    def pr_comment(self, project: dict, number: int, marker: str, body: str) -> None:
+        """Maintainer-facing comment on a submission PR (PRs share the issues comment API).
+        `marker` identifies one logical comment (e.g. one per revision round) so retries edit
+        it instead of posting duplicates."""
+        self._upsert_comment(project, number, f"<!-- {marker} -->", body)
+
+    def _upsert_comment(self, project: dict, number: int, marker: str, body: str) -> None:
         access = self.app_token(project["installation_id"], project["repository_id"])
         root = f"/repos/{project['repository']}"
-        marker = f"<!-- co4:work:{work_id} -->"
         # Reconcile before write, so retries do not produce a comment per heartbeat.
         for page in range(1, 101):
             comments = self.request(
@@ -354,6 +362,8 @@ class DemoGitHub:
         self.publications = []
         self.labels_added = []
         self.branch_updates = []
+        # marker -> (pr number, body); upserted by marker like the real gateway.
+        self.pr_comments = {}
         self._next_pr_number = 500
 
     def inspect_checkpoint(self, project, checkpoint, *, with_diff=False):
@@ -361,6 +371,9 @@ class DemoGitHub:
 
     def status_comment(self, project, number, work_id, body):
         self.comments.append((number, body))
+
+    def pr_comment(self, project, number, marker, body):
+        self.pr_comments[marker] = (number, body)
 
     def add_label(self, project, number, label):
         self.labels_added.append((number, label))

@@ -5,6 +5,7 @@ import uuid
 
 from sqlalchemy import delete, select
 
+from co4 import iteration
 from co4.domain import audit, get, pr_body, project_data, status
 from co4.models import Event, Lease, OAuthState, Outbox, Project, Session, Submission, Work
 from co4.security import redact
@@ -120,6 +121,10 @@ class Dispatcher:
                 self.github.status_comment(project, payload["number"], payload["work_id"], body)
             elif kind == "label":
                 self.github.add_label(project, payload["number"], payload["label"])
+            elif kind == "pr_comment":
+                self.github.pr_comment(
+                    project, payload["number"], payload["marker"], payload["body"]
+                )
             elif kind == "publish":
                 result = self.github.publish(project, *publish_args)
             elif kind == "update_submission":
@@ -189,6 +194,7 @@ class Dispatcher:
                     submission.round += 1
                     submission.state = "awaiting_rereview"
                     submission.updated = self.clock()
+                    iteration.round_update_comment(s, p, submission, lease)
                 elif lease:
                     lease.error = (
                         "Submission update raced with a policy change. Maintainer intervention "

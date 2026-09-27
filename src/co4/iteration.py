@@ -17,23 +17,32 @@ and the loop guards that keep it from spinning forever:
   - reviews on an outdated head commit are ignored
   - a revision trigger the project's policy has not enabled is ignored
   - reaching Policy.max_revision_rounds escalates to a human instead of looping
+
+Round semantics: ``Submission.round`` is the *version* of the PR head -- 1 for the initial
+publish, incremented each time a revision is fast-forwarded onto it. The number of revision
+rounds already spent is therefore ``round - 1``, and ``max_revision_rounds`` counts revision
+rounds (not versions): with the default of 3 a PR may be revised 3 times, and the next
+changes-requested review escalates instead.
 """
 
 from __future__ import annotations
 
+import json
 import re
 import time
 
 from sqlalchemy import select
 
-from co4.domain import ROLES, audit, get, status
+from co4.domain import ROLES, audit, get, public_receipt, status
 from co4.models import Device, Lease, Member, Outbox, Project, Submission, User, Work
 from co4.schemas import Policy
 from co4.security import redact
 
 # Submission states in which a revision round is already in flight; a new review/comment
 # trigger while one of these is active must not start a second, concurrent round.
-OPEN_REVISION_STATES = {"changes_requested", "revising", "awaiting_rereview"}
+# `awaiting_rereview` is deliberately NOT here: once a round has been fast-forwarded onto the PR,
+# a fresh changes-requested review on that new head is exactly how the next round starts.
+OPEN_REVISION_STATES = {"changes_requested", "revising"}
 # States in which the PR itself is already settled; nothing more to revise.
 SETTLED_STATES = {"merged", "closed"}
 
@@ -74,8 +83,15 @@ def request_revision(
         return "duplicate"
     if submission.state in OPEN_REVISION_STATES:
         return "already_open"
-    if submission.round >= policy.max_revision_rounds:
-        escalate(s, project, work, submission, reason="Revision round limit reached")
+    if revisions_spent(submission) >= policy.max_revision_rounds:
+        escalate(
+            s,
+            project,
+            work,
+            submission,
+            reason=f"Revision round limit reached (all {policy.max_revision_rounds} allowed "
+            "revision rounds are used)",
+        )
         return "escalated"
     # The feedback is stashed on the most recent lease for this work (the one whose
     # publish/round this review is about). The revision lease created for this round (see
@@ -109,9 +125,81 @@ def request_revision(
         s,
         work,
         "A reviewer requested changes. This is queued for a new revision round "
-        f"(round {submission.round + 1} of {policy.max_revision_rounds}).",
+        f"(revision {revisions_spent(submission) + 1} of {policy.max_revision_rounds}).",
     )
     return "requested"
+
+
+def revisions_spent(submission: Submission) -> int:
+    """Revision rounds already fast-forwarded onto the PR (see module docstring)."""
+    return max(0, submission.round - 1)
+
+
+def _no_mentions(text: str) -> str:
+    # Never let quoted reviewer text or summaries ping people from an App comment.
+    return text.replace("@", "@​")
+
+
+def pr_comment(s, project_id: str, submission: Submission, tag: str, body: str) -> None:
+    """Queue a maintainer-facing comment on the submission's PR (not the originating issue).
+
+    One comment per (submission, tag): redelivery or a retried outbox job edits the same
+    comment rather than posting a duplicate (see GitHub.pr_comment's marker reconciliation).
+    """
+    key = f"pr_comment:{submission.id}:{tag}"
+    marker = f"co4:submission:{submission.id}:{tag}"
+    payload = {"number": submission.pr_number, "marker": marker, "body": body}
+    job = s.scalar(select(Outbox).where(Outbox.key == key))
+    if job is None:
+        s.add(Outbox(key=key, project_id=project_id, kind="pr_comment", payload=payload))
+    else:
+        job.payload = payload
+        job.state = "pending"
+        job.available = time.time()
+        job.lock_token = ""
+        job.locked_until = 0
+
+
+def round_update_comment(s, project: Project, submission: Submission, lease: Lease) -> None:
+    """Queue the per-round status/receipt comment on the PR once a revision has been
+    fast-forwarded onto it and is waiting for a fresh review."""
+    policy = Policy(**project.policy)
+    feedback = lease.feedback or {}
+    quoted_text = _no_mentions(feedback.get("body") or "(no review text)")[:2000]
+    quoted = "\n".join("> " + line for line in quoted_text.splitlines() or [""])
+    summary = _no_mentions(lease.summary or "")[:4000]
+    red = (
+        "skipped (existing tests already cover the change)"
+        if (lease.evidence or {}).get("red_exit") is None
+        else "failing test added first"
+    )
+    reviewer = _no_mentions(feedback.get("reviewer") or "a reviewer")
+    body = (
+        f"**Co4 · revision {revisions_spent(submission)} of {policy.max_revision_rounds} "
+        "ready for re-review**\n\n"
+        f"The App fast-forwarded this PR to `{lease.checkpoint.get('sha', '')}` after the "
+        "contributor approved that exact commit. Nothing else about the PR changed.\n\n"
+        f"Feedback addressed (from {reviewer}):\n\n{quoted}\n\n"
+        f"### What changed this round\n\n{summary}\n\n"
+        f"Evidence: baseline passed · regression test {red} · implementation passed · "
+        "verification passed. Worker-reported; independent CI is still required.\n\n"
+        "<details><summary>Execution receipt for this round</summary>\n\n"
+        f"```json\n{json.dumps(public_receipt(lease), indent=2)}\n```\n</details>"
+    )
+    pr_comment(s, project.id, submission, f"round:{submission.round}", body)
+
+
+def review_approved(s, work: Work, submission: Submission, *, head_sha: str | None) -> bool:
+    """Record a permitted reviewer's approval of the current PR head. Display/state only --
+    Co4 never merges. Returns True when the submission state changed."""
+    if submission.state not in {"open", "awaiting_rereview"}:
+        return False
+    if head_sha is not None and head_sha != submission.expected_head_sha:
+        return False
+    submission.state = "approved"
+    submission.updated = time.time()
+    audit(s, work.project_id, "github", "review.approved_on_github", work_id=work.id)
+    return True
 
 
 def escalate(s, project, work: Work, submission: Submission, *, reason: str) -> None:
@@ -123,20 +211,29 @@ def escalate(s, project, work: Work, submission: Submission, *, reason: str) -> 
     submission.state = "escalated"
     submission.updated = time.time()
     audit(s, work.project_id, "co4", "revision.escalated", work_id=work.id, reason=reason)
-    key = f"label:{work.id}:{NEEDS_HUMAN_LABEL}"
-    if not s.scalar(select(Outbox).where(Outbox.key == key)):
-        s.add(
-            Outbox(
-                key=key,
-                project_id=project.id,
-                kind="label",
-                payload={
-                    "work_id": work.id,
-                    "number": work.number,
-                    "label": NEEDS_HUMAN_LABEL,
-                },
+    # Label both the originating issue and the PR itself: maintainers triage from either.
+    for target, number in (("issue", work.number), ("pr", submission.pr_number)):
+        key = f"label:{work.id}:{target}:{NEEDS_HUMAN_LABEL}"
+        if not s.scalar(select(Outbox).where(Outbox.key == key)):
+            s.add(
+                Outbox(
+                    key=key,
+                    project_id=project.id,
+                    kind="label",
+                    payload={"work_id": work.id, "number": number, "label": NEEDS_HUMAN_LABEL},
+                )
             )
-        )
+    policy = Policy(**project.policy)
+    pr_comment(
+        s,
+        project.id,
+        submission,
+        "escalated",
+        f"**Co4 · needs a maintainer**\n\n{reason}.\n\n"
+        f"Revision rounds used: {revisions_spent(submission)} of "
+        f"{policy.max_revision_rounds}. Co4 will not start another revision round for this PR "
+        f"automatically; it has been labelled `{NEEDS_HUMAN_LABEL}`.",
+    )
     status(
         s,
         work,
