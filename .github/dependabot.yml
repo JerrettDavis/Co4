@@ -4,6 +4,13 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    groups:
+      pip-patch:
+        update-types:
+          - "patch"
+      pip-minor:
+        update-types:
+          - "minor"
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
