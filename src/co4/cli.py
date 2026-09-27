@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import sys
 from cryptography.fernet import Fernet
+from co4 import __version__
 
 
 def _configure_streams() -> None:
@@ -19,7 +20,8 @@ def _configure_streams() -> None:
 def main():
     _configure_streams()
     parser = argparse.ArgumentParser(prog="co4", description="Co4 contribution governance and device orchestration")
-    sub = parser.add_subparsers(dest="command", required=True)
+    parser.add_argument("--version", action="version", version=f"co4 {__version__}")
+    sub = parser.add_subparsers(dest="command", required=False)
     server = sub.add_parser("serve", help="Run the production GitHub-connected control plane")
     server.add_argument("--host", default="0.0.0.0")
     server.add_argument("--port", type=int, default=8080)
@@ -46,6 +48,9 @@ def main():
     export.add_argument("--root", default="~/.co4")
     export.add_argument("lease_id")
     args = parser.parse_args()
+    if args.command is None:
+        parser.print_help()
+        raise SystemExit(0)
     try:
         if args.command == "keygen":
             print(Fernet.generate_key().decode())
