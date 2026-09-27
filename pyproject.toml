@@ -17,6 +17,7 @@ dependencies = [
 [project.optional-dependencies]
 postgres = ["psycopg[binary]>=3.2,<4"]
 test = ["pytest==9.0.2", "pytest-bdd>=8.1,<9", "playwright>=1.50,<2", "pytest-cov>=7.0,<8"]
+lint = ["ruff==0.16.1", "mypy==1.20.2"]
 [project.scripts]
 co4 = "co4.cli:main"
 [tool.setuptools.packages.find]
@@ -28,3 +29,25 @@ pythonpath = ["src"]
 testpaths = ["tests"]
 addopts = "-ra"
 bdd_features_base_dir = "specs"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+# Issue #11 scopes ruff (like the mypy config below) to the co4 package itself.
+# tests/ and scripts/ are still reformatted opportunistically but not held to full
+# lint enforcement in CI yet; that's a follow-up, not part of this pass.
+extend-exclude = ["tests", "scripts"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src/co4"]
+ignore_missing_imports = true
+warn_unused_ignores = true
+# No module-wide overrides: co4.app duck-types its GitHub client as
+# `Any | DemoGitHub | GitHub` (see co4.github). Until that gets a real Protocol/base
+# class (a separate refactor, out of scope for issue #11), the affected call sites
+# carry per-line `# type: ignore[union-attr]` comments. warn_unused_ignores keeps
+# those honest once the refactor lands.

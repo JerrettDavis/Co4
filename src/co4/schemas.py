@@ -1,12 +1,17 @@
 from __future__ import annotations
-from typing import Literal, Optional
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
 
 class Strict(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+
 class DevicePollRequest(Strict):
     device_code: str = Field(min_length=1, max_length=128)
+
 
 class DeviceCodeResponse(Strict):
     device_code: str = Field(min_length=1, max_length=128)
@@ -15,14 +20,17 @@ class DeviceCodeResponse(Strict):
     expires_in: int = Field(ge=1, le=3600)
     interval: int = Field(ge=1, le=60)
 
+
 class DevicePollResponse(BaseModel):
     """Not strict — server returns more fields sometimes."""
+
     model_config = ConfigDict(extra="ignore")
     status: Literal["pending", "slow_down", "expired", "denied", "authorized"]
-    user: Optional[dict] = None
+    user: dict | None = None
     # Present only when GitHub's slow_down response supplied an explicit interval;
     # omitted (not defaulted) when the client must instead increment its own interval.
-    interval: Optional[int] = None
+    interval: int | None = None
+
 
 class Policy(Strict):
     access: Literal["open", "verified", "maintainers"] = "verified"
@@ -36,19 +44,23 @@ class Policy(Strict):
     prompt_notes: str = Field(default="", max_length=10_000)
     strategy: Literal["priority_age", "fifo"] = "priority_age"
 
+
 class EnrollProject(Strict):
     installation_id: int = Field(gt=0)
     repository: str = Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+
 
 class ProjectUpdate(Strict):
     policy: Policy
     budget_tokens: int = Field(ge=1000, le=2_000_000_000)
     active: bool = True
 
+
 class MemberUpdate(Strict):
     login: str = Field(min_length=1, max_length=100)
     role: Literal["maintainer", "triager", "contributor", "suspended"] = "contributor"
     verified: bool = False
+
 
 class DeviceCreate(Strict):
     name: str = Field(min_length=1, max_length=100)
@@ -57,14 +69,18 @@ class DeviceCreate(Strict):
     max_tokens: int = Field(default=100_000, ge=1000, le=10_000_000)
     labels: list[str] = Field(default_factory=list, max_length=30)
 
+
 class DeviceUpdate(Strict):
     enabled: bool
+
 
 class Poll(Strict):
     repositories: list[str] = Field(max_length=100)
 
+
 class Fence(Strict):
     generation: int = Field(ge=1)
+
 
 class Usage(Strict):
     input_tokens: int | None = Field(default=None, ge=0)
@@ -75,26 +91,33 @@ class Usage(Strict):
     complete: bool = False
     source: Literal["reported", "unavailable", "fixture"] = "unavailable"
 
+
 class Heartbeat(Fence):
     phase: Literal["baseline", "spec", "red", "green", "verify", "ready"]
     usage: Usage | None = None
+
 
 class WorkerEvent(Fence):
     sequence: int = Field(ge=1)
     kind: str = Field(pattern=r"^[a-z_]{1,50}$")
     text: str = Field(max_length=262144)
 
+
 class Checkpoint(Strict):
     repository: str = Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
     branch: str = Field(pattern=r"^co4/work/[a-z0-9/-]{1,150}$")
     sha: str = Field(pattern=r"^[a-f0-9]{40}$")
 
+
 class CheckpointRequest(Fence):
     checkpoint: Checkpoint
 
+
 class Evidence(Strict):
     execution_mode: Literal["interactive", "noninteractive", "mixed"] = "noninteractive"
-    interaction_capture: Literal["terminal_output", "structured_events", "mixed"] = "structured_events"
+    interaction_capture: Literal["terminal_output", "structured_events", "mixed"] = (
+        "structured_events"
+    )
     baseline_exit: int = 0
     red_exit: int = 1
     green_exit: int = 0
@@ -106,7 +129,10 @@ class Evidence(Strict):
     baseline_commit: str = Field(pattern=r"^[a-f0-9]{40}$")
     red_commit: str = Field(pattern=r"^[a-f0-9]{40}$")
     green_commit: str = Field(pattern=r"^[a-f0-9]{40}$")
-    notes: str = Field(default="Worker-reported evidence; independent CI remains required.", max_length=2000)
+    notes: str = Field(
+        default="Worker-reported evidence; independent CI remains required.", max_length=2000
+    )
+
 
 class Complete(Fence):
     checkpoint: Checkpoint
@@ -115,16 +141,20 @@ class Complete(Fence):
     summary: str = Field(min_length=1, max_length=20_000)
     diff: str = Field(min_length=1, max_length=2_000_000)
 
+
 class Approval(Strict):
     sha: str = Field(pattern=r"^[a-f0-9]{40}$")
     review_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
     confirm_reviewed: Literal[True]
 
+
 class Failure(Fence):
     reason: str = Field(min_length=1, max_length=2000)
 
+
 class Dib(Strict):
     device_id: str
+
 
 class Watch(Strict):
     enabled: bool = True

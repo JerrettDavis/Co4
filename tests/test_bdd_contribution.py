@@ -4,16 +4,19 @@ Steps reuse the same fixtures and helpers as the unit-level suites (``app``/``cl
 conftest, ``configured`` from test_worker, ``setup_job`` from test_handover) so that the
 Gherkin contract and the pytest assertions exercise one and the same code path.
 """
+
 from __future__ import annotations
+
 import pytest
+from conftest import device_client, poll
 from pytest_bdd import given, scenarios, then, when
 from sqlalchemy import select
+from test_handover import setup_job
+from test_worker import configured
+
 from co4.adapters import UsageMeter, aggregate
 from co4.models import Lease, Member, Project, User, Work
 from co4.worker import WorkerError
-from conftest import device_client, poll
-from test_handover import setup_job
-from test_worker import configured
 
 scenarios("contribution.feature")
 
@@ -33,6 +36,7 @@ def _lease(clients, work_id, who="contributor"):
 
 
 # --- Scenario: Only validated and permitted work can be allocated -------------------------
+
 
 @given("a project requires validation and verified contributors")
 def project_requires_validation(app, clients, ctx):
@@ -71,8 +75,10 @@ def maintainer_validates_and_verifies(app, clients, ctx):
     assert maintainer.post(f"/api/work/{ctx['work_id']}/validate", json={}).status_code == 200
     # Validation alone is not enough: the contributor is still unverified.
     assert poll(ctx["worker"])["lease"] is None
-    response = maintainer.put(f"/api/projects/{ctx['project_id']}/members",
-                              json={"login": "contributor", "role": "contributor", "verified": True})
+    response = maintainer.put(
+        f"/api/projects/{ctx['project_id']}/members",
+        json={"login": "contributor", "role": "contributor", "verified": True},
+    )
     assert response.status_code == 200, response.text
 
 
@@ -87,6 +93,7 @@ def one_lease(app, clients, ctx):
 
 # --- Scenario: Automatic execution is not permission to publish ---------------------------
 
+
 @given("an automatically allocated contribution passes baseline, red, green and verification")
 def contribution_passes(app, clients, tmp_path, monkeypatch, ctx):
     worker, device = configured(app, clients, tmp_path, monkeypatch)
@@ -96,7 +103,12 @@ def contribution_passes(app, clients, tmp_path, monkeypatch, ctx):
     ctx.update(worker=worker, device=device, job=job)
     lease = _lease(clients, job["work"]["id"])
     evidence = lease["evidence"]
-    assert (evidence["baseline_exit"], evidence["red_exit"], evidence["green_exit"], evidence["verify_exit"]) == (0, 1, 0, 0)
+    assert (
+        evidence["baseline_exit"],
+        evidence["red_exit"],
+        evidence["green_exit"],
+        evidence["verify_exit"],
+    ) == (0, 1, 0, 0)
 
 
 @when("the worker submits its review package")
@@ -117,8 +129,14 @@ def no_pull_request(app, ctx):
 @then("a device token cannot authorize publication")
 def device_cannot_approve(app, ctx):
     lease = ctx["lease"]
-    response = ctx["device"].post(f"/api/leases/{lease['id']}/approve", json={
-        "sha": lease["checkpoint"]["sha"], "review_digest": lease["review_digest"], "confirm_reviewed": True})
+    response = ctx["device"].post(
+        f"/api/leases/{lease['id']}/approve",
+        json={
+            "sha": lease["checkpoint"]["sha"],
+            "review_digest": lease["review_digest"],
+            "confirm_reviewed": True,
+        },
+    )
     assert response.status_code == 401
     app.state.dispatcher.tick()
     assert app.state.github.publications == []
@@ -127,8 +145,14 @@ def device_cannot_approve(app, ctx):
 @when("the contributor approves the exact tested SHA and package digest")
 def contributor_approves(clients, ctx):
     lease = ctx["lease"]
-    response = clients["contributor"].post(f"/api/leases/{lease['id']}/approve", json={
-        "sha": lease["checkpoint"]["sha"], "review_digest": lease["review_digest"], "confirm_reviewed": True})
+    response = clients["contributor"].post(
+        f"/api/leases/{lease['id']}/approve",
+        json={
+            "sha": lease["checkpoint"]["sha"],
+            "review_digest": lease["review_digest"],
+            "confirm_reviewed": True,
+        },
+    )
     assert response.status_code == 200, response.text
     assert response.json()["state"] == "publishing"
 
@@ -144,19 +168,27 @@ def app_creates_draft(app, clients, ctx):
 
 # --- Scenario: A recovery window protects the original contributor ------------------------
 
+
 @given("an allocation has had no communication for 12 hours")
 def stale_allocation(app, clients, ctx):
     worker, other, other_info, job, now = setup_job(app, clients)
-    checkpoint = {"repository": "co4-demo/tiny-library", "branch": "co4/work/41/prior", "sha": "a" * 40}
+    checkpoint = {
+        "repository": "co4-demo/tiny-library",
+        "branch": "co4/work/41/prior",
+        "sha": "a" * 40,
+    }
     with app.state.db.transaction() as s:
         s.get(Work, job["work"]["id"]).checkpoint = checkpoint
-    ctx.update(worker=worker, other=other, other_info=other_info, job=job, now=now, checkpoint=checkpoint)
+    ctx.update(
+        worker=worker, other=other, other_info=other_info, job=job, now=now, checkpoint=checkpoint
+    )
 
 
 @when("another eligible contributor requests dibs")
 def request_dibs(clients, ctx):
-    response = clients["backup"].post(f"/api/leases/{ctx['job']['lease']['id']}/dib",
-                                      json={"device_id": ctx["other_info"]["id"]})
+    response = clients["backup"].post(
+        f"/api/leases/{ctx['job']['lease']['id']}/dib", json={"device_id": ctx["other_info"]["id"]}
+    )
     assert response.status_code == 200, response.text
     ctx["dib"] = response.json()
 
@@ -169,7 +201,9 @@ def twelve_hour_window(ctx):
 @then("a heartbeat alone does not cancel the dibs")
 def heartbeat_does_not_cancel(app, ctx):
     lease_id = ctx["job"]["lease"]["id"]
-    response = ctx["worker"].post(f"/api/worker/leases/{lease_id}/heartbeat", json={"generation": 1, "phase": "baseline"})
+    response = ctx["worker"].post(
+        f"/api/worker/leases/{lease_id}/heartbeat", json={"generation": 1, "phase": "baseline"}
+    )
     assert response.status_code == 409
     with app.state.db.read() as s:
         lease = s.get(Lease, lease_id)
@@ -193,7 +227,9 @@ def new_generation(ctx):
 @then("the original worker cannot update the old lease")
 def old_worker_fenced(app, ctx):
     lease_id = ctx["job"]["lease"]["id"]
-    response = ctx["worker"].post(f"/api/worker/leases/{lease_id}/heartbeat", json={"generation": 1, "phase": "baseline"})
+    response = ctx["worker"].post(
+        f"/api/worker/leases/{lease_id}/heartbeat", json={"generation": 1, "phase": "baseline"}
+    )
     assert response.status_code == 409
     with app.state.db.read() as s:
         assert s.get(Lease, lease_id).state == "reassigned"
@@ -206,14 +242,17 @@ def checkpoint_retained(ctx):
 
 # --- Scenario: Tests cannot be weakened to manufacture a pass -----------------------------
 
+
 @given("the red phase changed regression tests and they failed")
 def red_phase_failed(app, clients, tmp_path, monkeypatch, ctx):
     worker, device = configured(app, clients, tmp_path, monkeypatch)
     exits = {}
     original_test = worker.test
+
     def recording_test(phase):
         exits[phase] = original_test(phase)
         return exits[phase]
+
     worker.test = recording_test
     ctx.update(worker=worker, device=device, exits=exits)
 
@@ -222,10 +261,12 @@ def red_phase_failed(app, clients, tmp_path, monkeypatch, ctx):
 def green_modifies_tests(app, clients, ctx):
     worker = ctx["worker"]
     original = worker.mock
+
     def tamper(phase):
         original(phase)
         if phase == "green":
             (worker.repository.path / "test_average.py").write_text("import unittest\n")
+
     worker.mock = tamper
     ctx["job"] = poll(ctx["device"])
     with pytest.raises(WorkerError) as error:
@@ -249,8 +290,10 @@ def worker_blocks(app, ctx):
 def no_approval_or_pr(app, clients, ctx):
     lease_id = ctx["job"]["lease"]["id"]
     sha = ctx["worker"].state["checkpoint"]["sha"]
-    response = clients["contributor"].post(f"/api/leases/{lease_id}/approve",
-                                           json={"sha": sha, "review_digest": "b" * 64, "confirm_reviewed": True})
+    response = clients["contributor"].post(
+        f"/api/leases/{lease_id}/approve",
+        json={"sha": sha, "review_digest": "b" * 64, "confirm_reviewed": True},
+    )
     assert response.status_code == 409
     app.state.dispatcher.tick()
     assert app.state.github.publications == []
@@ -258,17 +301,24 @@ def no_approval_or_pr(app, clients, ctx):
 
 # --- Scenario: Unknown provider usage is not free work ------------------------------------
 
+
 @given("a harness does not expose complete token usage")
 def harness_without_usage(app, clients, ctx):
     worker, info = device_client(app, clients["contributor"], harness="copilot", max_tokens=100_000)
     job = poll(worker)
     lease = job["lease"]
     meter = UsageMeter("copilot")
-    meter.feed('{"type":"assistant.message","data":{"content":"done"}}')  # No usage counters at all.
+    meter.feed(
+        '{"type":"assistant.message","data":{"content":"done"}}'
+    )  # No usage counters at all.
     usage = aggregate([meter.data(30)], 30)
-    assert usage["input_tokens"] is None and not usage["complete"] and usage["source"] == "unavailable"
-    response = worker.post(f"/api/worker/leases/{lease['id']}/heartbeat",
-                           json={"generation": lease["generation"], "phase": "baseline", "usage": usage})
+    assert (
+        usage["input_tokens"] is None and not usage["complete"] and usage["source"] == "unavailable"
+    )
+    response = worker.post(
+        f"/api/worker/leases/{lease['id']}/heartbeat",
+        json={"generation": lease["generation"], "phase": "baseline", "usage": usage},
+    )
     assert response.status_code == 200, response.text
     ctx.update(worker=worker, job=job, reservation=lease["token_reservation"])
 

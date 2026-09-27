@@ -1,15 +1,18 @@
 from __future__ import annotations
+
 import os
 import queue
 import signal
 import subprocess
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
+
 
 class ExecutionStopped(RuntimeError):
     pass
+
 
 @dataclass
 class ProcessResult:
@@ -21,7 +24,9 @@ def kill_tree(process):
     if process.poll() is not None:
         return
     if os.name == "nt":
-        subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"], capture_output=True, timeout=15)
+        subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"], capture_output=True, timeout=15
+        )
     else:
         try:
             os.killpg(process.pid, signal.SIGTERM)
@@ -36,17 +41,38 @@ def kill_tree(process):
         process.kill()
 
 
-def run_process(argv: list[str], cwd, *, stdin: str | None = None, env: dict | None = None,
-                on_output: Callable[[str, str], None] = lambda *_: None,
-                on_tick: Callable[[], None] = lambda: None,
-                timeout_seconds: float = 3600, idle_seconds: float = 900,
-                tick_seconds: float = 10) -> ProcessResult:
-    """Bounded streams, whole-process-tree cancellation, idle and absolute watchdogs. No shell=True."""
+def run_process(
+    argv: list[str],
+    cwd,
+    *,
+    stdin: str | None = None,
+    env: dict | None = None,
+    on_output: Callable[[str, str], None] = lambda *_: None,
+    on_tick: Callable[[], None] = lambda: None,
+    timeout_seconds: float = 3600,
+    idle_seconds: float = 900,
+    tick_seconds: float = 10,
+) -> ProcessResult:
+    """Bounded streams, whole-process-tree cancellation, idle and absolute watchdogs.
+    No shell=True."""
     started = last_output = last_tick = time.monotonic()
-    messages = queue.Queue(maxsize=128)
-    process = subprocess.Popen(argv, cwd=str(cwd), env=env, stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=os.name != "nt",
-        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0)
+    messages = queue.Queue(maxsize=128)  # type: ignore[var-annotated]  # pre-existing, out of scope for #11
+    process = subprocess.Popen(
+        argv,
+        cwd=str(cwd),
+        env=env,
+        stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=os.name != "nt",
+        # CREATE_NEW_PROCESS_GROUP is Windows-only; not present in the typeshed under
+        # Linux/macOS, which is how CI (ubuntu-latest) type-checks this. Pre-existing,
+        # out of scope for #11.
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
+        if os.name == "nt"
+        else 0,
+    )
+
     def read(stream, channel):
         try:
             while chunk := stream.readline(262144):
@@ -54,16 +80,22 @@ def run_process(argv: list[str], cwd, *, stdin: str | None = None, env: dict | N
         finally:
             messages.put((channel, None))
             stream.close()
-    readers = [threading.Thread(target=read, args=(process.stdout, "stdout"), daemon=True),
-               threading.Thread(target=read, args=(process.stderr, "stderr"), daemon=True)]
+
+    readers = [
+        threading.Thread(target=read, args=(process.stdout, "stdout"), daemon=True),
+        threading.Thread(target=read, args=(process.stderr, "stderr"), daemon=True),
+    ]
     for reader in readers:
         reader.start()
     if stdin is not None:
+
         def writer():
             try:
-                process.stdin.write(stdin.encode()); process.stdin.close()
+                process.stdin.write(stdin.encode())
+                process.stdin.close()
             except (BrokenPipeError, OSError):
                 pass
+
         threading.Thread(target=writer, daemon=True).start()
     done = 0
     try:
@@ -72,7 +104,9 @@ def run_process(argv: list[str], cwd, *, stdin: str | None = None, env: dict | N
             if now - started > timeout_seconds:
                 raise ExecutionStopped("Absolute execution time limit reached")
             if now - last_output > idle_seconds:
-                raise ExecutionStopped("Harness or test command stopped communicating; idle watchdog fired")
+                raise ExecutionStopped(
+                    "Harness or test command stopped communicating; idle watchdog fired"
+                )
             if now - last_tick >= tick_seconds:
                 on_tick()
                 last_tick = now
