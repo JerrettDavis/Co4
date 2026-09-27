@@ -125,6 +125,39 @@ def lease_data(s, lease: Lease, *, detail: bool = False) -> dict:
     return result
 
 
+def submission_data(s, submission: Submission) -> dict:
+    """PR review-iteration status for the UI: the PR, its revision round, its state, and a
+    short excerpt of the latest reviewer feedback (already redacted at ingestion)."""
+    result = {
+        k: getattr(submission, k)
+        for k in (
+            "id",
+            "work_id",
+            "pr_number",
+            "head_branch",
+            "expected_head_sha",
+            "round",
+            "state",
+            "updated",
+        )
+    }
+    result["revisions"] = max(0, submission.round - 1)
+    result["feedback"] = None
+    for lease in s.scalars(
+        select(Lease).where(Lease.work_id == submission.work_id).order_by(Lease.created.desc())
+    ):
+        fb = lease.feedback or {}
+        if fb.get("body") is not None and fb.get("trigger"):
+            body = " ".join(str(fb.get("body") or "").split())
+            result["feedback"] = {
+                "reviewer": fb.get("reviewer", ""),
+                "trigger": fb.get("trigger", ""),
+                "excerpt": body[:280] + ("…" if len(body) > 280 else ""),
+            }
+            break
+    return result
+
+
 def audit(s, project_id: str, actor: str, action: str, **detail):
     s.add(Audit(project_id=project_id, actor=actor, action=action, detail=detail))
 

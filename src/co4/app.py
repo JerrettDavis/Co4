@@ -31,6 +31,7 @@ from co4.domain import (
     project_data,
     public_receipt,
     status,
+    submission_data,
     visible,
     work_data,
 )
@@ -570,7 +571,7 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
     @app.get("/api/dashboard")
     def dashboard(u=Depends(user)):  # noqa: B008
         with database.read() as s:
-            projects, works, leases = [], [], []
+            projects, works, leases, submissions = [], [], [], []
             for p in s.scalars(select(Project).order_by(Project.repository)):
                 if not visible(s, p, u.id):
                     continue
@@ -591,6 +592,10 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
                         data = lease_data(s, lease)
                         data["stale"] = coordinator.stale(lease)
                         leases.append(data)
+                submissions.extend(
+                    submission_data(s, sub)
+                    for sub in s.scalars(select(Submission).where(Submission.project_id == p.id))
+                )
             devices = [
                 {
                     k: getattr(d, k)
@@ -611,6 +616,7 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
                 "projects": projects,
                 "work": works,
                 "leases": leases,
+                "submissions": submissions,
                 "devices": devices,
                 "user": {"id": u.id, "login": u.login},
             }
@@ -780,7 +786,13 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
                 data["stale"] = coordinator.stale(lease)
                 data["receipt"] = public_receipt(lease)
                 history.append(data)
-            return {"work": work_data(w), "project": project_data(p), "leases": history}
+            sub = s.scalar(select(Submission).where(Submission.work_id == w.id))
+            return {
+                "work": work_data(w),
+                "project": project_data(p),
+                "leases": history,
+                "submission": submission_data(s, sub) if sub else None,
+            }
 
     @app.post("/api/work/{work_id}/validate")
     def validate_work(work_id: str, u=Depends(user)):  # noqa: B008
