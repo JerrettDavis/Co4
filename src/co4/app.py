@@ -1300,7 +1300,7 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
                     )
                     if submission:
                         w = get(s, Work, submission.work_id)
-                        iteration.request_revision(
+                        outcome = iteration.request_revision(
                             s,
                             coordinator,
                             p,
@@ -1314,6 +1314,19 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
                             # filtering only applies to pull_request_review, which does.
                             head_sha=None,
                         )
+                        # "escalated" already gets its own detailed audit entry from
+                        # iteration.escalate(); every other non-"requested" outcome is otherwise
+                        # a silent no-op, so record why this comment produced no visible action.
+                        if outcome not in {"requested", "escalated"}:
+                            audit(
+                                s,
+                                p.id,
+                                "github",
+                                "revision.request_ignored",
+                                work_id=w.id,
+                                trigger="revise_comment",
+                                outcome=outcome,
+                            )
             elif kind == "pull_request_review" and action == "submitted":
                 review = payload.get("review", {})
                 if review.get("state") == "approved" and revision_permitted:
@@ -1341,7 +1354,7 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
                     )
                     if submission:
                         w = get(s, Work, submission.work_id)
-                        iteration.request_revision(
+                        outcome = iteration.request_revision(
                             s,
                             coordinator,
                             p,
@@ -1353,6 +1366,18 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
                             reviewer_login=review.get("user", {}).get("login", ""),
                             head_sha=review.get("commit_id"),
                         )
+                        # See the /co4 revise comment handler above: "escalated" audits itself,
+                        # every other non-"requested" outcome would otherwise be a silent no-op.
+                        if outcome not in {"requested", "escalated"}:
+                            audit(
+                                s,
+                                p.id,
+                                "github",
+                                "revision.request_ignored",
+                                work_id=w.id,
+                                trigger="changes_requested",
+                                outcome=outcome,
+                            )
             elif kind == "pull_request":
                 pr = payload.get("pull_request", {})
                 submission = s.scalar(
