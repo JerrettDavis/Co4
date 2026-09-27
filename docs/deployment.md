@@ -2,7 +2,7 @@
 
 ## Local installation
 
-`python -m pip install .` installs the control plane and worker entry point. A built wheel is also included under `dist/`. Runtime dependency versions are pinned in `pyproject.toml`; installation requires access to an appropriate package index unless dependencies are already present. No hosted model or JavaScript build is needed to start the web application.
+`python -m pip install .` installs the control plane and worker entry point. To build a wheel locally, run `make build` (outputs to `dist/`, which is not tracked in git). Runtime dependency versions are pinned in `pyproject.toml`; installation requires access to an appropriate package index unless dependencies are already present. No hosted model or JavaScript build is needed to start the web application.
 
 Use `co4 demo` only on loopback. It intentionally makes fixture identities available without GitHub authentication and uses a known demo key. A demo is not a shortcut to production configuration.
 
