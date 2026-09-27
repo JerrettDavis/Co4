@@ -21,12 +21,13 @@ and the loop guards that keep it from spinning forever:
 
 from __future__ import annotations
 
+import re
 import time
 
 from sqlalchemy import select
 
-from co4.domain import audit, status
-from co4.models import Lease, Outbox, Submission, Work
+from co4.domain import ROLES, audit, get, status
+from co4.models import Device, Lease, Member, Outbox, Project, Submission, User, Work
 from co4.schemas import Policy
 from co4.security import redact
 
@@ -142,3 +143,74 @@ def escalate(s, project, work: Work, submission: Submission, *, reason: str) -> 
         f"Escalated for maintainer attention: {reason}. A maintainer must intervene "
         "before another revision round can begin.",
     )
+
+
+MENTION = re.compile(r"@([A-Za-z0-9][A-Za-z0-9-]{0,38})")
+
+
+def _base_lease(s, work_id: str) -> Lease | None:
+    return s.scalar(select(Lease).where(Lease.work_id == work_id).order_by(Lease.created.desc()))
+
+
+def _mentioned_members_with_devices(s, project: Project, base_lease: Lease | None) -> set[str]:
+    """User ids @-mentioned in the feedback that triggered this round, restricted to Co4
+    members (any watching, non-suspended role) who have at least one enabled device."""
+    if base_lease is None:
+        return set()
+    text = (base_lease.feedback or {}).get("body", "")
+    logins = {m.group(1).lower() for m in MENTION.finditer(text)}
+    if not logins:
+        return set()
+    found = set()
+    for login in logins:
+        user = s.scalar(select(User).where(User.login == login))
+        if not user:
+            continue
+        member = s.get(Member, (project.id, user.id))
+        if not member or member.role not in ROLES or not member.watching:
+            continue
+        if s.scalar(select(Device).where(Device.user_id == user.id, Device.enabled.is_(True))):
+            found.add(user.id)
+    return found
+
+
+def route(s, coordinator, device: Device, w: Work) -> bool:
+    """Return True when `device` may currently claim revision-requested work `w`.
+
+    Three-tier affinity order, for `revision_affinity_seconds` measured from the moment the
+    revision was requested (Submission.updated):
+      (a) the original contributor (the user who held the most recent lease on this work);
+      (b) an @-mentioned Co4 member who has an enabled device;
+      (c) anyone else normally eligible, once the window has elapsed.
+    Devices belonging to a user in tier (a)/(b) are always allowed through immediately -- the
+    window only *withholds* the work from everyone else, it does not make (a)/(b) wait.
+    """
+    project = get(s, Project, w.project_id)
+    policy = Policy(**project.policy)
+    submission = s.scalar(select(Submission).where(Submission.work_id == w.id))
+    if not submission or submission.state == "escalated":
+        # Escalated means a human must intervene; never auto-route it back into a device's
+        # hands until a maintainer resets it.
+        return False
+    base_lease = _base_lease(s, w.id)
+    original_contributor = base_lease.user_id if base_lease else None
+    if device.user_id == original_contributor:
+        return True
+    if device.user_id in _mentioned_members_with_devices(s, project, base_lease):
+        return True
+    elapsed = coordinator.clock() - submission.updated
+    return elapsed >= policy.revision_affinity_seconds
+
+
+def any_device_eligible(s, coordinator, w: Work) -> bool:
+    """Whether *any* currently enabled device in the project could ever pick up `w` right now,
+    ignoring the affinity window. Used by Coordinator.sweep() to decide whether an
+    affinity-window expiry with nobody available is a dead end that needs a human."""
+    project = get(s, Project, w.project_id)
+    for member in s.scalars(select(Member).where(Member.project_id == project.id)):
+        for device in s.scalars(
+            select(Device).where(Device.user_id == member.user_id, Device.enabled.is_(True))
+        ):
+            if coordinator.eligible(s, device, w):
+                return True
+    return False
