@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from cryptography.fernet import Fernet
+
 from co4 import __version__
 
 
