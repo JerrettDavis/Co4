@@ -13,7 +13,7 @@ Verified September 24, 2026, on Linux with Python 3.13.5. These results describe
 | Python compilation | Passed | `python -m compileall -q src scripts` |
 | Wheel build | Passed | Setuptools wheel build and separate installation |
 
-The two installed-package checklists are walkthrough checks, not additional pytest cases. No coverage percentage, security audit, provider invoice verification, or throughput result is asserted. Machine-readable reports: [pytest-results.xml](pytest-results.xml), [package-test-report.json](package-test-report.json), and [installed-terminal-test-report.json](installed-terminal-test-report.json).
+The two installed-package checklists are walkthrough checks, not additional pytest cases. Code coverage is measured and reported in CI with `--cov-fail-under=72` (measured baseline 77% on Windows with pytest-cov 7, where POSIX-only PTY tests are skipped, minus 5). No security audit, provider invoice verification, or throughput result is asserted. Machine-readable reports: [pytest-results.xml](pytest-results.xml), [package-test-report.json](package-test-report.json), and [installed-terminal-test-report.json](installed-terminal-test-report.json).
 
 ## New interactive verification
 

@@ -17,7 +17,7 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: python scripts/verify_manifest.py --check
       - run: python -m pip install -e '.[test]'
-      - run: pytest -q --junitxml=test-results.xml
+      - run: pytest -q --junitxml=test-results.xml --cov=co4 --cov-report=term-missing --cov-report=xml --cov-fail-under=72
       - run: python -m compileall -q src
       - run: python -m pip wheel --no-deps --wheel-dir dist .
   browser:
