@@ -252,6 +252,15 @@ class GitHub:
             "POST", f"{root}/issues/{number}/comments", access, json={"body": marker + "\n" + body}
         )
 
+    def add_label(self, project: dict, number: int, label: str) -> None:
+        access = self.app_token(project["installation_id"], project["repository_id"])
+        self.request(
+            "POST",
+            f"/repos/{project['repository']}/issues/{number}/labels",
+            access,
+            json={"labels": [label]},
+        )
+
     def publish(
         self, project: dict, lease_id: str, sha: str, number: int, title: str, body: str
     ) -> dict:
@@ -331,6 +340,7 @@ class DemoGitHub:
     def __init__(self):
         self.comments = []
         self.publications = []
+        self.labels_added = []
         self._next_pr_number = 500
 
     def inspect_checkpoint(self, project, checkpoint, *, with_diff=False):
@@ -338,6 +348,9 @@ class DemoGitHub:
 
     def status_comment(self, project, number, work_id, body):
         self.comments.append((number, body))
+
+    def add_label(self, project, number, label):
+        self.labels_added.append((number, label))
 
     def publish(self, project, lease_id, sha, number, title, body):
         branch = f"co4/submission/{lease_id}/{sha[:12]}"

@@ -101,6 +101,8 @@ class Dispatcher:
                     payload["body"] + f"\n\n[Open allocation, evidence, and human review]({link})"
                 )
                 self.github.status_comment(project, payload["number"], payload["work_id"], body)
+            elif kind == "label":
+                self.github.add_label(project, payload["number"], payload["label"])
             elif kind == "publish":
                 result = self.github.publish(project, *publish_args)
         with self.db.transaction() as s:

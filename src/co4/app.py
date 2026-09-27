@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy import select
 
+from co4 import iteration
 from co4.config import Settings, is_loopback_url
 from co4.db import Database
 from co4.domain import (
@@ -1152,6 +1153,43 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
                     pd["repository"],
                     payload["sender"]["login"],
                 )
+        # Reviewer permission for PR review iteration is checked the same way as the ready
+        # label above: via can_manage, on the sender who actually triggered the event, never on
+        # a co4 Member row (a reviewer need not ever have logged into Co4). Also never trust an
+        # event authored by our own App bot -- that would be a self-triggered loop.
+        app_bot = (cfg.app_slug + "[bot]") if cfg.app_slug else None
+        revision_permitted = False
+        if (
+            pd
+            and kind == "pull_request_review"
+            and action == "submitted"
+            and payload.get("review", {}).get("state") == "changes_requested"
+            and payload.get("review", {}).get("user", {}).get("login") != app_bot
+            and not cfg.demo
+        ):
+            revision_permitted = await asyncio.to_thread(
+                gateway.can_manage,  # type: ignore[union-attr]
+                installation,
+                pd["repository_id"],
+                pd["repository"],
+                payload["review"]["user"]["login"],
+            )
+        elif (
+            pd
+            and kind == "issue_comment"
+            and action == "created"
+            and "pull_request" in payload.get("issue", {})
+            and payload.get("comment", {}).get("body", "").strip().startswith("/co4 revise")
+            and payload.get("sender", {}).get("login") != app_bot
+            and not cfg.demo
+        ):
+            revision_permitted = await asyncio.to_thread(
+                gateway.can_manage,  # type: ignore[union-attr]
+                installation,
+                pd["repository_id"],
+                pd["repository"],
+                payload["sender"]["login"],
+            )
         with database.transaction() as s:
             if s.get(Delivery, delivery):
                 return {"duplicate": True}
@@ -1192,7 +1230,11 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
                 ):
                     fail(400, "Issue payload is incomplete")
                 ingest_issue(s, p, issue, trusted_ready, action)
-            elif kind == "issue_comment" and action == "created":
+            elif (
+                kind == "issue_comment"
+                and action == "created"
+                and "pull_request" not in payload.get("issue", {})
+            ):
                 text = payload.get("comment", {}).get("body", "").strip()
                 if text.startswith("/co4 "):
                     identity = s.scalar(
@@ -1231,6 +1273,59 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
                                 )
                         except (HTTPException, ValueError):
                             audit(s, p.id, identity.id, "github_command.denied", work_id=w.id)
+            elif (
+                kind == "issue_comment"
+                and action == "created"
+                and "pull_request" in payload.get("issue", {})
+            ):
+                text = payload.get("comment", {}).get("body", "").strip()
+                if text.startswith("/co4 revise") and revision_permitted:
+                    submission = s.scalar(
+                        select(Submission).where(
+                            Submission.project_id == p.id,
+                            Submission.pr_number == payload.get("issue", {}).get("number", -1),
+                        )
+                    )
+                    if submission:
+                        w = get(s, Work, submission.work_id)
+                        iteration.request_revision(
+                            s,
+                            coordinator,
+                            p,
+                            w,
+                            submission,
+                            review_id=f"comment:{payload.get('comment', {}).get('id')}",
+                            trigger="revise_comment",
+                            feedback_text=text,
+                            reviewer_login=payload.get("sender", {}).get("login", ""),
+                            # issue_comment payloads carry no PR head SHA; outdated-head
+                            # filtering only applies to pull_request_review, which does.
+                            head_sha=None,
+                        )
+            elif kind == "pull_request_review" and action == "submitted":
+                review = payload.get("review", {})
+                if review.get("state") == "changes_requested" and revision_permitted:
+                    pr = payload.get("pull_request", {})
+                    submission = s.scalar(
+                        select(Submission).where(
+                            Submission.project_id == p.id,
+                            Submission.pr_number == pr.get("number", -1),
+                        )
+                    )
+                    if submission:
+                        w = get(s, Work, submission.work_id)
+                        iteration.request_revision(
+                            s,
+                            coordinator,
+                            p,
+                            w,
+                            submission,
+                            review_id=f"review:{review.get('id')}",
+                            trigger="changes_requested",
+                            feedback_text=review.get("body") or "",
+                            reviewer_login=review.get("user", {}).get("login", ""),
+                            head_sha=review.get("commit_id"),
+                        )
             elif kind == "pull_request":
                 pr = payload.get("pull_request", {})
                 submission = s.scalar(
