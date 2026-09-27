@@ -75,6 +75,9 @@ def request_revision(
         return "trigger_disabled"
     if submission.state in SETTLED_STATES:
         return "settled"
+    if submission.state == "escalated":
+        # Escalation is sticky: only a maintainer (outside this flow) may resume automation.
+        return "escalated"
     # A review of a diff that is no longer the PR's actual head is reviewing stale content;
     # never let it drive a new round the reviewer never saw.
     if head_sha is not None and head_sha != submission.expected_head_sha:
