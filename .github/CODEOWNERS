@@ -1,6 +1,16 @@
 # CODEOWNERS file for the Co4 project
 # Enables requiring code-owner review in branch protection settings
 # See: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+#
+# Later matching patterns take precedence. All entries currently route to the
+# sole maintainer; update the specific sections as collaborators are added.
 
-# All paths route to the sole maintainer until additional collaborators are added
+# Default owner for everything in the repo
 * @JerrettDavis
+
+# Security-sensitive entry points (GitHub App admin permission, worker execution)
+/src/co4/cli.py @JerrettDavis
+/src/co4/app.py @JerrettDavis
+
+# Documentation
+/docs/ @JerrettDavis
