@@ -1,40 +1,91 @@
 from __future__ import annotations
+
 import asyncio
-from collections import defaultdict, deque
-from contextlib import asynccontextmanager
 import hashlib
 import hmac
 import json
 import logging
-from pathlib import Path
 import time
+from collections import defaultdict, deque
+from contextlib import asynccontextmanager
+from pathlib import Path
 from urllib.parse import urlencode, urlparse
+
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from sqlalchemy import select
+
+from co4 import iteration
 from co4.config import Settings, is_loopback_url
 from co4.db import Database
-from co4.domain import (ACTIVE, Coordinator, audit, fail, get, lease_data, member, project_data,
-    public_receipt, status, visible, work_data)
+from co4.domain import (
+    ACTIVE,
+    Coordinator,
+    audit,
+    fail,
+    get,
+    lease_data,
+    member,
+    project_data,
+    public_receipt,
+    status,
+    submission_data,
+    visible,
+    work_data,
+)
 from co4.github import DemoGitHub, GitHub, GitHubError
-from co4.models import Audit, Decline, Delivery, Device, DeviceFlow, Event, Lease, Member, OAuthState, Outbox, Project, Session, User, Work
+from co4.models import (
+    Audit,
+    Decline,
+    Delivery,
+    Device,
+    DeviceFlow,
+    Event,
+    Lease,
+    Member,
+    OAuthState,
+    Outbox,
+    Project,
+    Session,
+    Submission,
+    User,
+    Work,
+)
 from co4.outbox import Dispatcher
-from co4.schemas import (Approval, CheckpointRequest, Complete, DeviceCodeResponse, DeviceCreate,
-    DevicePollRequest, DevicePollResponse, DeviceUpdate, Dib, EnrollProject, Failure, Heartbeat,
-    MemberUpdate, Policy, Poll, ProjectUpdate, Watch, WorkerEvent)
+from co4.schemas import (
+    Approval,
+    CheckpointRequest,
+    Complete,
+    DeviceCreate,
+    DevicePollRequest,
+    DeviceUpdate,
+    Dib,
+    EnrollProject,
+    Failure,
+    Heartbeat,
+    MemberUpdate,
+    Policy,
+    Poll,
+    ProjectUpdate,
+    Watch,
+    WorkerEvent,
+)
 from co4.security import Vault, digest, redact, token
 from co4.seed import seed
 
 LOG = logging.getLogger("co4")
 
+
 class DemoLogin(BaseModel):
     login: str
+
 
 class BodyLimit:
     def __init__(self, app, maximum=3_000_000):
         self.app, self.maximum = app, maximum
+
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
             return await self.app(scope, receive, send)
@@ -45,17 +96,21 @@ class BodyLimit:
                 return
             size += len(message.get("body", b""))
             if size > self.maximum:
-                return await JSONResponse({"detail": "Request body too large"}, 413)(scope, receive, send)
+                return await JSONResponse({"detail": "Request body too large"}, 413)(
+                    scope, receive, send
+                )
             chunks.append(message.get("body", b""))
             if not message.get("more_body"):
                 break
         sent = False
+
         async def replay():
             nonlocal sent
             if not sent:
                 sent = True
                 return {"type": "http.request", "body": b"".join(chunks), "more_body": False}
             return await receive()
+
         await self.app(scope, replay, send)
 
 
@@ -68,6 +123,7 @@ class SlidingWindowLimiter:
     quota (e.g. GitHub's 50/hour device-code limit per client_id) or that writes a
     permanent row per call.
     """
+
     def __init__(self, limit: int, window_seconds: float):
         self.limit = limit
         self.window_seconds = window_seconds
@@ -135,6 +191,7 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
     @asynccontextmanager
     async def lifespan(app):
         stop = asyncio.Event()
+
         async def loop():
             while not stop.is_set():
                 try:
@@ -145,14 +202,21 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
                     await asyncio.wait_for(stop.wait(), timeout=5)
                 except TimeoutError:
                     pass
+
         task = asyncio.create_task(loop()) if cfg.background else None
         yield
         stop.set()
         if task:
             await task
 
-    app = FastAPI(title="Co4 control plane", version="0.1.0a2", lifespan=lifespan,
-                  docs_url=None, openapi_url="/api/openapi.json", redoc_url=None)
+    app = FastAPI(
+        title="Co4 control plane",
+        version="0.1.0a2",
+        lifespan=lifespan,
+        docs_url=None,
+        openapi_url="/api/openapi.json",
+        redoc_url=None,
+    )
     app.state.db, app.state.coordinator, app.state.github = database, coordinator, gateway
     app.state.settings, app.state.dispatcher, app.state.vault = cfg, dispatcher, vault
     app.add_middleware(BodyLimit)
@@ -163,7 +227,11 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
 
     @app.middleware("http")
     async def guard(request: Request, call_next):
-        if request.method not in {"GET", "HEAD", "OPTIONS"} and not request.url.path.startswith("/webhooks/") and request.url.path not in DEVICE_FLOW_POST_PATHS:
+        if (
+            request.method not in {"GET", "HEAD", "OPTIONS"}
+            and not request.url.path.startswith("/webhooks/")
+            and request.url.path not in DEVICE_FLOW_POST_PATHS
+        ):
             if request.cookies.get("co4_session"):
                 if request.headers.get("x-co4-csrf") != "1":
                     return JSONResponse({"detail": "CSRF header required"}, 403)
@@ -171,14 +239,26 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
                 if origin and not _origins_match(origin, cfg.public_url):
                     return JSONResponse({"detail": "Origin is not allowed"}, 403)
         response = await call_next(request)
-        response.headers.update({"X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY",
-            "Referrer-Policy": "same-origin", "Cache-Control": "no-store",
-            "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self' https://github.com"})
+        response.headers.update(
+            {
+                "X-Content-Type-Options": "nosniff",
+                "X-Frame-Options": "DENY",
+                "Referrer-Policy": "same-origin",
+                "Cache-Control": "no-store",
+                "Content-Security-Policy": (
+                    "default-src 'self'; script-src 'self'; style-src 'self'; "
+                    "img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; "
+                    "base-uri 'self'; form-action 'self' https://github.com"
+                ),
+            }
+        )
         return response
 
     def credentials(request):
         header = request.headers.get("authorization", "")
-        return header[7:] if header.startswith("Bearer ") else request.cookies.get("co4_session", "")
+        return (
+            header[7:] if header.startswith("Bearer ") else request.cookies.get("co4_session", "")
+        )
 
     def user(request: Request) -> User:
         raw = credentials(request)
@@ -207,13 +287,26 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
 
     def create_session(s, u, access=""):
         raw = token("co4_session")
-        s.add(Session(token_hash=digest(raw), user_id=u.id, expires=time.time() + 7 * 86400,
-                      github_token=vault.seal(access) if access else ""))
+        s.add(
+            Session(
+                token_hash=digest(raw),
+                user_id=u.id,
+                expires=time.time() + 7 * 86400,
+                github_token=vault.seal(access) if access else "",
+            )
+        )
         return raw
 
     def session_cookie(response, raw):
-        response.set_cookie("co4_session", raw, httponly=True, secure=cfg.secure_cookies,
-                            samesite="lax", max_age=7*86400, path="/")
+        response.set_cookie(
+            "co4_session",
+            raw,
+            httponly=True,
+            secure=cfg.secure_cookies,
+            samesite="lax",
+            max_age=7 * 86400,
+            path="/",
+        )
         return response
 
     @app.get("/healthz")
@@ -229,7 +322,14 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
             identity = {"id": u.id, "login": u.login}
         except HTTPException:
             identity = None
-        return {"demo": cfg.demo, "public_url": cfg.public_url, "user": identity, "install_url": f"https://github.com/apps/{cfg.app_slug}/installations/new" if cfg.app_slug else None}
+        return {
+            "demo": cfg.demo,
+            "public_url": cfg.public_url,
+            "user": identity,
+            "install_url": f"https://github.com/apps/{cfg.app_slug}/installations/new"
+            if cfg.app_slug
+            else None,
+        }
 
     @app.post("/auth/demo")
     def demo_login(payload: DemoLogin):
@@ -249,10 +349,25 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
         state = token("state")
         with database.transaction() as s:
             s.add(OAuthState(state_hash=digest(state), expires=time.time() + 600))
-        response = RedirectResponse("https://github.com/login/oauth/authorize?" + urlencode({
-            "client_id": cfg.client_id, "state": state, "redirect_uri": cfg.public_url + "/auth/github/callback"}))
-        response.set_cookie("co4_oauth_state", state, httponly=True, secure=cfg.secure_cookies,
-                            samesite="lax", max_age=600, path="/auth/github/callback")
+        response = RedirectResponse(
+            "https://github.com/login/oauth/authorize?"
+            + urlencode(
+                {
+                    "client_id": cfg.client_id,
+                    "state": state,
+                    "redirect_uri": cfg.public_url + "/auth/github/callback",
+                }
+            )
+        )
+        response.set_cookie(
+            "co4_oauth_state",
+            state,
+            httponly=True,
+            secure=cfg.secure_cookies,
+            samesite="lax",
+            max_age=600,
+            path="/auth/github/callback",
+        )
         return response
 
     @app.get("/auth/github/callback")
@@ -267,13 +382,14 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
             if not saved or saved.expires <= time.time():
                 fail(400, "OAuth state expired or has already been used")
             s.delete(saved)
-        access = gateway.exchange(code)
-        identity = gateway.user(access)
+        access = gateway.exchange(code)  # type: ignore[union-attr]
+        identity = gateway.user(access)  # type: ignore[union-attr]
         with database.transaction() as s:
             u = s.scalar(select(User).where(User.github_id == identity["id"]))
             if not u:
                 u = User(github_id=identity["id"], login=identity["login"])
-                s.add(u); s.flush()
+                s.add(u)
+                s.flush()
             u.login = identity["login"]
             raw = create_session(s, u, access)
         response = session_cookie(RedirectResponse("/"), raw)
@@ -288,24 +404,28 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
         client_host = request.client.host if request.client else "unknown"
         if not device_code_limiter.hit(f"device-code:{client_host}"):
             fail(429, "Too many device sign-in attempts from this address. Try again later.")
-        data = gateway.request_device_code(DEVICE_SCOPES)
+        data = gateway.request_device_code(DEVICE_SCOPES)  # type: ignore[union-attr]
         interval = int(data.get("interval") or DEVICE_INTERVAL_DEFAULT)
         expires_at = time.time() + int(data.get("expires_in") or DEVICE_EXPIRES_IN_DEFAULT)
         with database.transaction() as s:
-            s.add(DeviceFlow(
-                device_code=data["device_code"],
-                user_code=data["user_code"],
-                scope=DEVICE_SCOPES,
-                expires_at=expires_at,
-                interval=interval,
-            ))
-        return JSONResponse({
-            "device_code": data["device_code"],
-            "user_code": data["user_code"],
-            "verification_uri": data["verification_uri"],
-            "expires_in": int(data.get("expires_in") or DEVICE_EXPIRES_IN_DEFAULT),
-            "interval": interval,
-        })
+            s.add(
+                DeviceFlow(
+                    device_code=data["device_code"],
+                    user_code=data["user_code"],
+                    scope=DEVICE_SCOPES,
+                    expires_at=expires_at,
+                    interval=interval,
+                )
+            )
+        return JSONResponse(
+            {
+                "device_code": data["device_code"],
+                "user_code": data["user_code"],
+                "verification_uri": data["verification_uri"],
+                "expires_in": int(data.get("expires_in") or DEVICE_EXPIRES_IN_DEFAULT),
+                "interval": interval,
+            }
+        )
 
     @app.post("/auth/github/device/poll")
     def device_flow_poll(body: DevicePollRequest):
@@ -320,11 +440,11 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
                 fail(409, "Device code already consumed")
             if record.expires_at <= time.time():
                 fail(400, "Device code expired")
-        outcome = gateway.poll_device_token(body.device_code)
+        outcome = gateway.poll_device_token(body.device_code)  # type: ignore[union-attr]
         status = outcome.get("status")
         if status == "authorized":
             access = outcome["access_token"]
-            identity = gateway.user(access)
+            identity = gateway.user(access)  # type: ignore[union-attr]
             with database.transaction() as s:
                 record = s.get(DeviceFlow, body.device_code)
                 if record.completed_at:
@@ -332,7 +452,8 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
                 u = s.scalar(select(User).where(User.github_id == identity["id"]))
                 if not u:
                     u = User(github_id=identity["id"], login=identity["login"])
-                    s.add(u); s.flush()
+                    s.add(u)
+                    s.flush()
                 u.login = identity["login"]
                 raw = create_session(s, u, access)
                 record.completed_at = time.time()
@@ -345,10 +466,10 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
             # Omitting it lets the frontend tell "GitHub said use exactly N seconds" apart
             # from "GitHub said nothing; add 5s to whatever interval you're already using."
             explicit_interval = outcome.get("interval")
-            body = {"status": "slow_down"}
+            slow_down: dict[str, str | int] = {"status": "slow_down"}
             if explicit_interval is not None:
-                body["interval"] = int(explicit_interval)
-            return JSONResponse(body)
+                slow_down["interval"] = int(explicit_interval)
+            return JSONResponse(slow_down)
         if status == "pending":
             return JSONResponse({"status": "pending"})
         if status == "expired":
@@ -363,27 +484,42 @@ def create_app(settings: Settings | None = None, github=None, db=None) -> FastAP
         The Co4 app's frontend does the actual polling — this page is a static fallback
         that lets the user view their code in a new tab."""
         import html as html_mod
+
         safe_code = html_mod.escape(code)
-        body = f"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>Co4 · Device sign-in</title>
-<style>body{{font-family:system-ui,sans-serif;max-width:560px;margin:3rem auto;padding:0 1rem;color:#123e54}}
-code{{font-family:ui-monospace,Menlo,monospace;background:#f3f6f8;padding:.15rem .4rem;border-radius:4px}}
-.btn{{display:inline-block;padding:.6rem 1rem;background:#123e54;color:#fff;border:0;border-radius:6px;font:inherit;cursor:pointer;text-decoration:none}}
-.muted{{color:#5a6e7e}}
-#user_code{{font-size:2.5rem;letter-spacing:.15em;background:#f3f6f8;padding:1rem;border-radius:8px;text-align:center;font-weight:bold}}
-</style></head>
-<body>
-<h1>Sign in with GitHub device flow</h1>
-<p>1. Open <a href="https://github.com/login/device" target="_blank" rel="noopener">https://github.com/login/device</a> in any browser and sign in to GitHub.</p>
-<p>2. Enter this code when prompted:</p>
-<p id="user_code">{safe_code or '—'}</p>
-<p class="muted">The Co4 app polls GitHub automatically while you complete authorization. This page is a fallback view of the code.</p>
-<p><a class="btn" href="https://github.com/login/device" target="_blank" rel="noopener">Open GitHub device page</a></p>
-</body></html>"""
+        # Built from adjacent string literals (rather than one long triple-quoted block) so
+        # each source line stays under the line-length limit without adding any whitespace
+        # to the rendered HTML.
+        body = (
+            "<!doctype html>\n"
+            '<html lang="en"><head><meta charset="utf-8">'
+            "<title>Co4 · Device sign-in</title>\n"
+            "<style>body{font-family:system-ui,sans-serif;max-width:560px;margin:3rem auto;"
+            "padding:0 1rem;color:#123e54}\n"
+            "code{font-family:ui-monospace,Menlo,monospace;background:#f3f6f8;"
+            "padding:.15rem .4rem;border-radius:4px}\n"
+            ".btn{display:inline-block;padding:.6rem 1rem;background:#123e54;color:#fff;"
+            "border:0;border-radius:6px;font:inherit;cursor:pointer;text-decoration:none}\n"
+            ".muted{color:#5a6e7e}\n"
+            "#user_code{font-size:2.5rem;letter-spacing:.15em;background:#f3f6f8;"
+            "padding:1rem;border-radius:8px;text-align:center;font-weight:bold}\n"
+            "</style></head>\n"
+            "<body>\n"
+            "<h1>Sign in with GitHub device flow</h1>\n"
+            '<p>1. Open <a href="https://github.com/login/device" target="_blank" '
+            'rel="noopener">https://github.com/login/device</a> in any browser and sign in '
+            "to GitHub.</p>\n"
+            "<p>2. Enter this code when prompted:</p>\n"
+            f'<p id="user_code">{safe_code or "—"}</p>\n'
+            '<p class="muted">The Co4 app polls GitHub automatically while you complete '
+            "authorization. This page is a fallback view of the code.</p>\n"
+            '<p><a class="btn" href="https://github.com/login/device" target="_blank" '
+            'rel="noopener">Open GitHub device page</a></p>\n'
+            "</body></html>"
+        )
         return HTMLResponse(body)
 
     @app.post("/auth/logout")
-    def logout(request: Request, u=Depends(user)):
+    def logout(request: Request, u=Depends(user)):  # noqa: B008
         with database.transaction() as s:
             s.delete(get(s, Session, digest(credentials(request))))
         response = JSONResponse({"ok": True})
@@ -391,72 +527,131 @@ code{{font-family:ui-monospace,Menlo,monospace;background:#f3f6f8;padding:.15rem
         return response
 
     @app.get("/api/github/installations")
-    def installations(request: Request, u=Depends(user)):
-        return [{"id": x["id"], "account": x["account"]["login"]} for x in gateway.installations(gh_user_token(request))]
+    def installations(request: Request, u=Depends(user)):  # noqa: B008
+        return [
+            {"id": x["id"], "account": x["account"]["login"]}
+            for x in gateway.installations(gh_user_token(request))  # type: ignore[union-attr]
+        ]
 
     @app.get("/api/github/repositories/{installation_id}")
-    def repositories(installation_id: int, request: Request, u=Depends(user)):
-        return [{"repository": x["full_name"], "admin": x.get("permissions", {}).get("admin", False)}
-                for x in gateway.repositories(gh_user_token(request), installation_id)]
+    def repositories(installation_id: int, request: Request, u=Depends(user)):  # noqa: B008
+        return [
+            {"repository": x["full_name"], "admin": x.get("permissions", {}).get("admin", False)}
+            for x in gateway.repositories(gh_user_token(request), installation_id)  # type: ignore[union-attr]
+        ]
 
     @app.post("/api/projects")
-    def enroll(payload: EnrollProject, request: Request, u=Depends(user)):
+    def enroll(payload: EnrollProject, request: Request, u=Depends(user)):  # noqa: B008
         if cfg.demo:
             fail(409, "Offline demo uses a fixture project; production enrollment requires GitHub")
-        repositories = gateway.repositories(gh_user_token(request), payload.installation_id)
-        repo = next((r for r in repositories if r["full_name"].lower() == payload.repository.lower()), None)
+        repositories = gateway.repositories(gh_user_token(request), payload.installation_id)  # type: ignore[union-attr]
+        repo = next(
+            (r for r in repositories if r["full_name"].lower() == payload.repository.lower()), None
+        )
         if not repo or not repo.get("permissions", {}).get("admin"):
             fail(403, "Repository admin permission and access to this installation are required")
         with database.transaction() as s:
             if s.scalar(select(Project).where(Project.repository_id == repo["id"])):
                 fail(409, "Repository is already enrolled")
-            p = Project(repository=repo["full_name"], repository_id=repo["id"], installation_id=payload.installation_id,
-                owner_id=u.id, private=repo["private"], default_branch=repo["default_branch"], policy=Policy().model_dump())
-            s.add(p); s.flush()
+            p = Project(
+                repository=repo["full_name"],
+                repository_id=repo["id"],
+                installation_id=payload.installation_id,
+                owner_id=u.id,
+                private=repo["private"],
+                default_branch=repo["default_branch"],
+                policy=Policy().model_dump(),
+            )
+            s.add(p)
+            s.flush()
             s.add(Member(project_id=p.id, user_id=u.id, role="owner", verified=True, watching=True))
             audit(s, p.id, u.id, "project.enrolled")
             return project_data(p)
 
     @app.get("/api/dashboard")
-    def dashboard(u=Depends(user)):
+    def dashboard(u=Depends(user)):  # noqa: B008
         with database.read() as s:
-            projects, works, leases = [], [], []
+            projects, works, leases, submissions = [], [], [], []
             for p in s.scalars(select(Project).order_by(Project.repository)):
                 if not visible(s, p, u.id):
                     continue
                 m = s.get(Member, (p.id, u.id))
                 row = project_data(p)
-                row.update(role=m.role if m else "visitor", watching=bool(m and m.watching), verified=bool(m and m.verified))
+                row.update(
+                    role=m.role if m else "visitor",
+                    watching=bool(m and m.watching),
+                    verified=bool(m and m.verified),
+                )
                 projects.append(row)
-                for w in s.scalars(select(Work).where(Work.project_id == p.id).order_by(Work.created)):
+                for w in s.scalars(
+                    select(Work).where(Work.project_id == p.id).order_by(Work.created)
+                ):
                     works.append(work_data(w))
                     if w.active_lease:
-                        l = get(s, Lease, w.active_lease)
-                        data = lease_data(s, l)
-                        data["stale"] = coordinator.stale(l)
+                        lease = get(s, Lease, w.active_lease)
+                        data = lease_data(s, lease)
+                        data["stale"] = coordinator.stale(lease)
                         leases.append(data)
-            devices = [{k: getattr(d, k) for k in ("id", "name", "harness", "autonomy", "enabled", "max_tokens", "labels", "last_seen")}
-                for d in s.scalars(select(Device).where(Device.user_id == u.id))]
-            return {"projects": projects, "work": works, "leases": leases, "devices": devices, "user": {"id": u.id, "login": u.login}}
+                submissions.extend(
+                    submission_data(s, sub)
+                    for sub in s.scalars(select(Submission).where(Submission.project_id == p.id))
+                )
+            devices = [
+                {
+                    k: getattr(d, k)
+                    for k in (
+                        "id",
+                        "name",
+                        "harness",
+                        "autonomy",
+                        "enabled",
+                        "max_tokens",
+                        "labels",
+                        "last_seen",
+                    )
+                }
+                for d in s.scalars(select(Device).where(Device.user_id == u.id))
+            ]
+            return {
+                "projects": projects,
+                "work": works,
+                "leases": leases,
+                "submissions": submissions,
+                "devices": devices,
+                "user": {"id": u.id, "login": u.login},
+            }
 
     @app.put("/api/projects/{project_id}")
-    def update_project(project_id: str, payload: ProjectUpdate, u=Depends(user)):
+    def update_project(project_id: str, payload: ProjectUpdate, u=Depends(user)):  # noqa: B008
         with database.transaction() as s:
             p = get(s, Project, project_id)
             member(s, p, u.id, {"owner", "maintainer"})
             if payload.budget_tokens < p.spent_tokens + p.reserved_tokens:
                 fail(409, "Budget cannot be lower than already-accounted usage and reservations")
             changed = payload.policy.model_dump() != p.policy or not payload.active
-            p.policy, p.budget_tokens, p.active = payload.policy.model_dump(), payload.budget_tokens, payload.active
+            p.policy, p.budget_tokens, p.active = (
+                payload.policy.model_dump(),
+                payload.budget_tokens,
+                payload.active,
+            )
             if changed:
-                for w in s.scalars(select(Work).where(Work.project_id == p.id, Work.active_lease.is_not(None))):
-                    coordinator.release(s, get(s, Lease, w.active_lease), terminal="cancelled", requeue=False)
-                    status(s, w, "Project policy changed. The old allocation is revoked; revalidation is required.")
+                for w in s.scalars(
+                    select(Work).where(Work.project_id == p.id, Work.active_lease.is_not(None))
+                ):
+                    coordinator.release(
+                        s, get(s, Lease, w.active_lease), terminal="cancelled", requeue=False
+                    )
+                    status(
+                        s,
+                        w,
+                        "Project policy changed. The old allocation is revoked; revalidation "
+                        "is required.",
+                    )
             audit(s, p.id, u.id, "project.policy_updated")
             return project_data(p)
 
     @app.post("/api/projects/{project_id}/watch")
-    def watch(project_id: str, payload: Watch, u=Depends(user)):
+    def watch(project_id: str, payload: Watch, u=Depends(user)):  # noqa: B008
         with database.transaction() as s:
             p = get(s, Project, project_id)
             if not visible(s, p, u.id):
@@ -469,14 +664,16 @@ code{{font-family:ui-monospace,Menlo,monospace;background:#f3f6f8;padding:.15rem
             return {"watching": m.watching, "verified": m.verified}
 
     @app.get("/api/projects/{project_id}/members")
-    def members(project_id: str, u=Depends(user)):
+    def members(project_id: str, u=Depends(user)):  # noqa: B008
         with database.read() as s:
             member(s, get(s, Project, project_id), u.id, {"owner", "maintainer", "triager"})
-            return [{"login": get(s, User, m.user_id).login, "role": m.role, "verified": m.verified}
-                for m in s.scalars(select(Member).where(Member.project_id == project_id))]
+            return [
+                {"login": get(s, User, m.user_id).login, "role": m.role, "verified": m.verified}
+                for m in s.scalars(select(Member).where(Member.project_id == project_id))
+            ]
 
     @app.put("/api/projects/{project_id}/members")
-    def update_member(project_id: str, payload: MemberUpdate, u=Depends(user)):
+    def update_member(project_id: str, payload: MemberUpdate, u=Depends(user)):  # noqa: B008
         with database.transaction() as s:
             p = get(s, Project, project_id)
             actor = member(s, p, u.id, {"owner", "maintainer"})
@@ -486,30 +683,44 @@ code{{font-family:ui-monospace,Menlo,monospace;background:#f3f6f8;padding:.15rem
             if target.id == p.owner_id:
                 fail(409, "The project owner role cannot be changed here")
             m = s.get(Member, (p.id, target.id))
-            if actor.role != "owner" and (payload.role == "maintainer" or (m and m.role == "maintainer")):
+            if actor.role != "owner" and (
+                payload.role == "maintainer" or (m and m.role == "maintainer")
+            ):
                 fail(403, "Only the project owner can grant or change maintainer access")
             if not m:
                 m = Member(project_id=p.id, user_id=target.id)
                 s.add(m)
             m.role, m.verified = payload.role, payload.verified
             s.flush()
-            for lease in s.scalars(select(Lease).where(Lease.user_id == target.id, Lease.state.in_(ACTIVE))):
+            for lease in s.scalars(
+                select(Lease).where(Lease.user_id == target.id, Lease.state.in_(ACTIVE))
+            ):
                 w = get(s, Work, lease.work_id)
-                if w.project_id == p.id and not coordinator.eligible(s, get(s, Device, lease.device_id), w):
+                if w.project_id == p.id and not coordinator.eligible(
+                    s, get(s, Device, lease.device_id), w
+                ):
                     coordinator.release(s, lease, terminal="cancelled")
                     status(s, w, "Contributor access changed; the old allocation is revoked.")
-            audit(s, p.id, u.id, "member.updated", login=target.login, role=m.role, verified=m.verified)
+            audit(
+                s,
+                p.id,
+                u.id,
+                "member.updated",
+                login=target.login,
+                role=m.role,
+                verified=m.verified,
+            )
             return {"ok": True}
 
     @app.post("/api/projects/{project_id}/sync")
-    def sync(project_id: str, u=Depends(user)):
+    def sync(project_id: str, u=Depends(user)):  # noqa: B008
         with database.read() as s:
             p = get(s, Project, project_id)
             member(s, p, u.id, {"owner", "maintainer", "triager"})
             data = project_data(p)
         if cfg.demo:
             return {"imported": 0, "mode": "demo"}
-        issues = gateway.issues(data)
+        issues = gateway.issues(data)  # type: ignore[union-attr]
         with database.transaction() as s:
             p = get(s, Project, project_id)
             for issue in issues:
@@ -517,16 +728,41 @@ code{{font-family:ui-monospace,Menlo,monospace;background:#f3f6f8;padding:.15rem
         return {"imported": len(issues)}
 
     @app.get("/api/projects/{project_id}/audit")
-    def project_audit(project_id: str, u=Depends(user)):
+    def project_audit(project_id: str, u=Depends(user)):  # noqa: B008
         with database.read() as s:
             member(s, get(s, Project, project_id), u.id, {"owner", "maintainer", "triager"})
-            events = list(s.scalars(select(Audit).where(Audit.project_id == project_id).order_by(Audit.created.desc()).limit(200)))
-            jobs = list(s.scalars(select(Outbox).where(Outbox.project_id == project_id, Outbox.state != "done")))
-            return {"audit": [{"action": e.action, "actor": e.actor, "detail": e.detail, "created": e.created} for e in events],
-                "outbox": [{"id": j.id, "kind": j.kind, "state": j.state, "attempts": j.attempts, "error": j.error} for j in jobs]}
+            events = list(
+                s.scalars(
+                    select(Audit)
+                    .where(Audit.project_id == project_id)
+                    .order_by(Audit.created.desc())
+                    .limit(200)
+                )
+            )
+            jobs = list(
+                s.scalars(
+                    select(Outbox).where(Outbox.project_id == project_id, Outbox.state != "done")
+                )
+            )
+            return {
+                "audit": [
+                    {"action": e.action, "actor": e.actor, "detail": e.detail, "created": e.created}
+                    for e in events
+                ],
+                "outbox": [
+                    {
+                        "id": j.id,
+                        "kind": j.kind,
+                        "state": j.state,
+                        "attempts": j.attempts,
+                        "error": j.error,
+                    }
+                    for j in jobs
+                ],
+            }
 
     @app.post("/api/outbox/{job_id}/retry")
-    def retry_job(job_id: str, u=Depends(user)):
+    def retry_job(job_id: str, u=Depends(user)):  # noqa: B008
         with database.transaction() as s:
             j = get(s, Outbox, job_id)
             member(s, get(s, Project, j.project_id), u.id, {"owner", "maintainer"})
@@ -536,22 +772,30 @@ code{{font-family:ui-monospace,Menlo,monospace;background:#f3f6f8;padding:.15rem
         return {"ok": True}
 
     @app.get("/api/work/{work_id}")
-    def work_detail(work_id: str, u=Depends(user)):
+    def work_detail(work_id: str, u=Depends(user)):  # noqa: B008
         with database.read() as s:
             w = get(s, Work, work_id)
             p = get(s, Project, w.project_id)
             if not visible(s, p, u.id):
                 fail(403, "Project permission required")
             history = []
-            for l in s.scalars(select(Lease).where(Lease.work_id == w.id).order_by(Lease.created)):
-                data = lease_data(s, l, detail=True)
-                data["stale"] = coordinator.stale(l)
-                data["receipt"] = public_receipt(l)
+            for lease in s.scalars(
+                select(Lease).where(Lease.work_id == w.id).order_by(Lease.created)
+            ):
+                data = lease_data(s, lease, detail=True)
+                data["stale"] = coordinator.stale(lease)
+                data["receipt"] = public_receipt(lease)
                 history.append(data)
-            return {"work": work_data(w), "project": project_data(p), "leases": history}
+            sub = s.scalar(select(Submission).where(Submission.work_id == w.id))
+            return {
+                "work": work_data(w),
+                "project": project_data(p),
+                "leases": history,
+                "submission": submission_data(s, sub) if sub else None,
+            }
 
     @app.post("/api/work/{work_id}/validate")
-    def validate_work(work_id: str, u=Depends(user)):
+    def validate_work(work_id: str, u=Depends(user)):  # noqa: B008
         with database.transaction() as s:
             w = get(s, Work, work_id)
             p = get(s, Project, w.project_id)
@@ -564,151 +808,212 @@ code{{font-family:ui-monospace,Menlo,monospace;background:#f3f6f8;padding:.15rem
             return work_data(w)
 
     @app.post("/api/devices")
-    def create_device(payload: DeviceCreate, u=Depends(user)):
+    def create_device(payload: DeviceCreate, u=Depends(user)):  # noqa: B008
         if payload.harness == "mock" and not cfg.demo:
             fail(422, "Mock execution is allowed only in offline demo mode")
         raw = token("co4_device")
         with database.transaction() as s:
             d = Device(user_id=u.id, token_hash=digest(raw), **payload.model_dump())
-            s.add(d); s.flush()
+            s.add(d)
+            s.flush()
             return {"id": d.id, "token": raw, "name": d.name}
 
     @app.put("/api/devices/{device_id}")
-    def toggle_device(device_id: str, payload: DeviceUpdate, u=Depends(user)):
+    def toggle_device(device_id: str, payload: DeviceUpdate, u=Depends(user)):  # noqa: B008
         with database.transaction() as s:
             d = get(s, Device, device_id)
             if d.user_id != u.id:
                 fail(403, "This is not your device")
             d.enabled = payload.enabled
             if not d.enabled:
-                for l in s.scalars(select(Lease).where(Lease.device_id == d.id, Lease.state == "running")):
-                    l.state, l.error = "blocked", "Device paused by contributor"
+                for lease in s.scalars(
+                    select(Lease).where(Lease.device_id == d.id, Lease.state == "running")
+                ):
+                    lease.state, lease.error = "blocked", "Device paused by contributor"
             return {"enabled": d.enabled}
 
     @app.delete("/api/devices/{device_id}")
-    def revoke_device(device_id: str, u=Depends(user)):
+    def revoke_device(device_id: str, u=Depends(user)):  # noqa: B008
         with database.transaction() as s:
             d = get(s, Device, device_id)
             if d.user_id != u.id:
                 fail(403, "This is not your device")
             d.enabled, d.token_hash = False, digest(token("revoked"))
-            for l in s.scalars(select(Lease).where(Lease.device_id == d.id, Lease.state.in_(ACTIVE))):
-                coordinator.release(s, l, terminal="cancelled")
+            for lease in s.scalars(
+                select(Lease).where(Lease.device_id == d.id, Lease.state.in_(ACTIVE))
+            ):
+                coordinator.release(s, lease, terminal="cancelled")
             return {"revoked": True}
 
     @app.post("/api/leases/{lease_id}/accept")
-    def accept(lease_id: str, u=Depends(user)):
+    def accept(lease_id: str, u=Depends(user)):  # noqa: B008
         with database.transaction() as s:
-            l = get(s, Lease, lease_id)
-            w = get(s, Work, l.work_id)
-            if l.user_id != u.id:
+            lease = get(s, Lease, lease_id)
+            w = get(s, Work, lease.work_id)
+            if lease.user_id != u.id:
                 fail(403, "Only the contributor can accept this allocation")
-            if l.created + 1800 <= time.time() or l.state != "offered" or not coordinator.eligible(s, get(s, Device, l.device_id), w):
+            if (
+                lease.created + 1800 <= time.time()
+                or lease.state != "offered"
+                or not coordinator.eligible(s, get(s, Device, lease.device_id), w)
+            ):
                 fail(409, "Offer is no longer available")
-            l.state, l.last_contact = "running", time.time()
-            audit(s, w.project_id, u.id, "allocation.accepted", lease_id=l.id)
-            return {"state": l.state}
+            lease.state, lease.last_contact = "running", time.time()
+            audit(s, w.project_id, u.id, "allocation.accepted", lease_id=lease.id)
+            return {"state": lease.state}
 
     @app.post("/api/leases/{lease_id}/deny")
-    def deny(lease_id: str, u=Depends(user)):
+    def deny(lease_id: str, u=Depends(user)):  # noqa: B008
         with database.transaction() as s:
-            l = get(s, Lease, lease_id)
-            w = get(s, Work, l.work_id)
-            if l.user_id != u.id:
+            lease = get(s, Lease, lease_id)
+            w = get(s, Work, lease.work_id)
+            if lease.user_id != u.id:
                 fail(403, "Only the contributor can decline their allocation")
-            if l.state not in ACTIVE - {"publishing"}:
+            if lease.state not in ACTIVE - {"publishing"}:
                 fail(409, "This allocation cannot be declined")
-            coordinator.release(s, l)
+            coordinator.release(s, lease)
             if not s.get(Decline, (u.id, w.id)):
                 s.add(Decline(user_id=u.id, work_id=w.id))
-            status(s, w, "The contributor declined or released this task. It will not be offered to them again.")
-            return {"state": l.state}
+            status(
+                s,
+                w,
+                "The contributor declined or released this task. It will not be offered to "
+                "them again.",
+            )
+            return {"state": lease.state}
 
     @app.post("/api/leases/{lease_id}/dib")
-    def dib_work(lease_id: str, payload: Dib, u=Depends(user)):
+    def dib_work(lease_id: str, payload: Dib, u=Depends(user)):  # noqa: B008
         with database.transaction() as s:
             d = get(s, Device, payload.device_id)
             if d.user_id != u.id:
                 fail(403, "Choose one of your own devices")
-            l = get(s, Lease, lease_id)
-            coordinator.dib(s, l, d)
-            return {"recovery_deadline": l.dib_expires}
+            lease = get(s, Lease, lease_id)
+            coordinator.dib(s, lease, d)
+            return {"recovery_deadline": lease.dib_expires}
 
     @app.post("/api/leases/{lease_id}/recover")
-    def recover_work(lease_id: str, u=Depends(user)):
+    def recover_work(lease_id: str, u=Depends(user)):  # noqa: B008
         with database.transaction() as s:
-            l = get(s, Lease, lease_id)
-            coordinator.recover(s, l, u.id)
-            return {"state": l.state}
+            lease = get(s, Lease, lease_id)
+            coordinator.recover(s, lease, u.id)
+            return {"state": lease.state}
 
     @app.post("/api/leases/{lease_id}/approve")
-    def approve(lease_id: str, payload: Approval, u=Depends(user)):
+    def approve(lease_id: str, payload: Approval, u=Depends(user)):  # noqa: B008
         with database.transaction() as s:
-            l = get(s, Lease, lease_id)
-            coordinator.approve(s, l, u.id, payload)
-            return {"state": l.state}
+            lease = get(s, Lease, lease_id)
+            coordinator.approve(s, lease, u.id, payload)
+            return {"state": lease.state}
 
     @app.get("/api/leases/{lease_id}/events")
-    def events(lease_id: str, after: int = 0, u=Depends(user)):
+    def events(lease_id: str, after: int = 0, u=Depends(user)):  # noqa: B008
         with database.read() as s:
-            l = get(s, Lease, lease_id)
-            if l.user_id != u.id:
+            lease = get(s, Lease, lease_id)
+            if lease.user_id != u.id:
                 fail(403, "Private execution traces are visible only to the contributing user")
-            rows = list(s.scalars(select(Event).where(Event.lease_id == l.id, Event.sequence > after).order_by(Event.sequence).limit(200)))
-            return [{"sequence": e.sequence, "kind": e.kind, "text": vault.open(e.payload), "created": e.created} for e in rows]
+            rows = list(
+                s.scalars(
+                    select(Event)
+                    .where(Event.lease_id == lease.id, Event.sequence > after)
+                    .order_by(Event.sequence)
+                    .limit(200)
+                )
+            )
+            return [
+                {
+                    "sequence": e.sequence,
+                    "kind": e.kind,
+                    "text": vault.open(e.payload),
+                    "created": e.created,
+                }
+                for e in rows
+            ]
 
     @app.post("/api/worker/poll")
-    def poll(payload: Poll, d=Depends(device)):
+    def poll(payload: Poll, d=Depends(device)):  # noqa: B008
         with database.transaction() as s:
             d = get(s, Device, d.id)
             coordinator.sweep(s)
-            l = coordinator.poll(s, d, payload.repositories)
-            if not l:
+            lease = coordinator.poll(s, d, payload.repositories)
+            if not lease:
                 return {"lease": None, "enabled": d.enabled, "harness": d.harness}
-            w = get(s, Work, l.work_id)
-            return {"lease": lease_data(s, l, detail=True), "work": work_data(w),
-                "project": project_data(get(s, Project, w.project_id)), "harness": d.harness, "enabled": d.enabled}
+            w = get(s, Work, lease.work_id)
+            return {
+                "lease": lease_data(s, lease, detail=True),
+                "work": work_data(w),
+                "project": project_data(get(s, Project, w.project_id)),
+                "harness": d.harness,
+                "enabled": d.enabled,
+            }
 
     @app.post("/api/worker/leases/{lease_id}/heartbeat")
-    def heartbeat(lease_id: str, payload: Heartbeat, d=Depends(device)):
+    def heartbeat(lease_id: str, payload: Heartbeat, d=Depends(device)):  # noqa: B008
         with database.transaction() as s:
             d = get(s, Device, d.id)
-            l, w = coordinator.fence(s, lease_id, d, payload.generation)
+            lease, w = coordinator.fence(s, lease_id, d, payload.generation)
             phases = ["baseline", "spec", "red", "green", "verify", "ready"]
-            if phases.index(payload.phase) not in {phases.index(l.phase), phases.index(l.phase) + 1}:
+            if phases.index(payload.phase) not in {
+                phases.index(lease.phase),
+                phases.index(lease.phase) + 1,
+            }:
                 fail(409, "Workflow phases must advance one step at a time")
-            changed = l.phase != payload.phase
-            l.phase, l.last_contact = payload.phase, time.time()
+            changed = lease.phase != payload.phase
+            lease.phase, lease.last_contact = payload.phase, time.time()
             if payload.usage:
                 new = payload.usage.model_dump()
                 for k in ("input_tokens", "output_tokens"):
-                    old = (l.usage or {}).get(k)
+                    old = (lease.usage or {}).get(k)
                     if old is not None and (new[k] is None or new[k] < old):
                         fail(409, "Cumulative usage cannot decrease")
-                l.usage = new
+                lease.usage = new
                 used = (new["input_tokens"] or 0) + (new["output_tokens"] or 0)
-                if used >= l.token_reservation:
-                    l.state, l.error = "blocked", "Token reservation reached; stop execution"
+                if used >= lease.token_reservation:
+                    lease.state, lease.error = (
+                        "blocked",
+                        "Token reservation reached; stop execution",
+                    )
             if changed:
-                audit(s, w.project_id, d.user_id, "workflow.phase", lease_id=l.id, phase=l.phase)
-                status(s, w, f"Current workflow stage: **{l.phase}**. Checkpoints are pushed by the contributor device; no PR exists before approval.")
-            return {"state": l.state, "stop": l.state != "running"}
+                audit(
+                    s,
+                    w.project_id,
+                    d.user_id,
+                    "workflow.phase",
+                    lease_id=lease.id,
+                    phase=lease.phase,
+                )
+                status(
+                    s,
+                    w,
+                    f"Current workflow stage: **{lease.phase}**. Checkpoints are pushed by the "
+                    "contributor device; no PR exists before approval.",
+                )
+            return {"state": lease.state, "stop": lease.state != "running"}
 
     @app.post("/api/worker/leases/{lease_id}/events")
-    def event(lease_id: str, payload: WorkerEvent, d=Depends(device)):
+    def event(lease_id: str, payload: WorkerEvent, d=Depends(device)):  # noqa: B008
         with database.transaction() as s:
-            l, _ = coordinator.fence(s, lease_id, get(s, Device, d.id), payload.generation)
-            existing = s.scalar(select(Event).where(Event.lease_id == l.id, Event.sequence == payload.sequence))
+            lease, _ = coordinator.fence(s, lease_id, get(s, Device, d.id), payload.generation)
+            existing = s.scalar(
+                select(Event).where(Event.lease_id == lease.id, Event.sequence == payload.sequence)
+            )
             redacted = redact(payload.text)
             if existing:
                 if existing.kind != payload.kind or vault.open(existing.payload) != redacted:
                     fail(409, "Event sequence already exists with different content")
                 return {"duplicate": True}
-            s.add(Event(lease_id=l.id, sequence=payload.sequence, kind=payload.kind, payload=vault.seal(redacted)))
+            s.add(
+                Event(
+                    lease_id=lease.id,
+                    sequence=payload.sequence,
+                    kind=payload.kind,
+                    payload=vault.seal(redacted),
+                )
+            )
             return {"accepted": True}
 
     @app.post("/api/worker/leases/{lease_id}/checkpoint")
-    def checkpoint(lease_id: str, payload: CheckpointRequest, d=Depends(device)):
+    def checkpoint(lease_id: str, payload: CheckpointRequest, d=Depends(device)):  # noqa: B008
         with database.read() as s:
             _, w = coordinator.fence(s, lease_id, get(s, Device, d.id), payload.generation)
             if payload.checkpoint.branch != f"co4/work/{w.number}/{lease_id}":
@@ -716,14 +1021,24 @@ code{{font-family:ui-monospace,Menlo,monospace;background:#f3f6f8;padding:.15rem
             p = project_data(get(s, Project, w.project_id))
         gateway.inspect_checkpoint(p, payload.checkpoint.model_dump())
         with database.transaction() as s:
-            l, w = coordinator.fence(s, lease_id, get(s, Device, d.id), payload.generation)
-            l.checkpoint, w.checkpoint = payload.checkpoint.model_dump(), payload.checkpoint.model_dump()
-            l.last_contact = time.time()
-            audit(s, w.project_id, d.user_id, "checkpoint.pushed", lease_id=l.id, sha=payload.checkpoint.sha)
+            lease, w = coordinator.fence(s, lease_id, get(s, Device, d.id), payload.generation)
+            lease.checkpoint, w.checkpoint = (
+                payload.checkpoint.model_dump(),
+                payload.checkpoint.model_dump(),
+            )
+            lease.last_contact = time.time()
+            audit(
+                s,
+                w.project_id,
+                d.user_id,
+                "checkpoint.pushed",
+                lease_id=lease.id,
+                sha=payload.checkpoint.sha,
+            )
             return {"accepted": True}
 
     @app.post("/api/worker/leases/{lease_id}/complete")
-    def complete(lease_id: str, payload: Complete, d=Depends(device)):
+    def complete(lease_id: str, payload: Complete, d=Depends(device)):  # noqa: B008
         with database.read() as s:
             _, w = coordinator.fence(s, lease_id, get(s, Device, d.id), payload.generation)
             if payload.checkpoint.branch != f"co4/work/{w.number}/{lease_id}":
@@ -733,17 +1048,26 @@ code{{font-family:ui-monospace,Menlo,monospace;background:#f3f6f8;padding:.15rem
         if not cfg.demo and not diff.strip():
             fail(422, "GitHub reports no changes for this checkpoint")
         with database.transaction() as s:
-            l, w = coordinator.fence(s, lease_id, get(s, Device, d.id), payload.generation)
-            coordinator.complete(s, l, w, payload, diff if not cfg.demo else payload.diff)
-            return {"state": l.state, "review_digest": l.review_digest}
+            lease, w = coordinator.fence(s, lease_id, get(s, Device, d.id), payload.generation)
+            coordinator.complete(s, lease, w, payload, diff if not cfg.demo else payload.diff)
+            return {"state": lease.state, "review_digest": lease.review_digest}
 
     @app.post("/api/worker/leases/{lease_id}/blocked")
-    def blocked(lease_id: str, payload: Failure, d=Depends(device)):
+    def blocked(lease_id: str, payload: Failure, d=Depends(device)):  # noqa: B008
         with database.transaction() as s:
-            l, w = coordinator.fence(s, lease_id, get(s, Device, d.id), payload.generation)
-            l.state, l.error, l.last_contact = "blocked", redact(payload.reason), time.time()
-            audit(s, w.project_id, d.user_id, "execution.blocked", lease_id=l.id)
-            status(s, w, "Execution stopped and requires contributor attention. Private diagnostics are available in Co4. No PR was created.")
+            lease, w = coordinator.fence(s, lease_id, get(s, Device, d.id), payload.generation)
+            lease.state, lease.error, lease.last_contact = (
+                "blocked",
+                redact(payload.reason),
+                time.time(),
+            )
+            audit(s, w.project_id, d.user_id, "execution.blocked", lease_id=lease.id)
+            status(
+                s,
+                w,
+                "Execution stopped and requires contributor attention. Private diagnostics are "
+                "available in Co4. No PR was created.",
+            )
             return {"state": "blocked"}
 
     def ingest_issue(s, p, issue, trusted_ready, action):
@@ -752,22 +1076,44 @@ code{{font-family:ui-monospace,Menlo,monospace;background:#f3f6f8;padding:.15rem
         policy = Policy(**p.policy)
         changed = bool(w and (w.title != issue["title"] or w.body != (issue.get("body") or "")))
         if not w:
-            w = Work(project_id=p.id, number=issue["number"], title=issue["title"][:1000], body=(issue.get("body") or "")[:100_000], labels=labels)
-            s.add(w); s.flush()
+            w = Work(
+                project_id=p.id,
+                number=issue["number"],
+                title=issue["title"][:1000],
+                body=(issue.get("body") or "")[:100_000],
+                labels=labels,
+            )
+            s.add(w)
+            s.flush()
         if changed and w.active_lease:
-            coordinator.release(s, get(s, Lease, w.active_lease), terminal="cancelled", requeue=False)
-        w.title, w.body, w.labels, w.updated = issue["title"][:1000], (issue.get("body") or "")[:100_000], labels, time.time()
+            coordinator.release(
+                s, get(s, Lease, w.active_lease), terminal="cancelled", requeue=False
+            )
+        w.title, w.body, w.labels, w.updated = (
+            issue["title"][:1000],
+            (issue.get("body") or "")[:100_000],
+            labels,
+            time.time(),
+        )
         if issue.get("state") == "closed" or action == "deleted":
             if w.active_lease:
-                coordinator.release(s, get(s, Lease, w.active_lease), terminal="cancelled", requeue=False)
+                coordinator.release(
+                    s, get(s, Lease, w.active_lease), terminal="cancelled", requeue=False
+                )
             w.state = "closed"
         elif set(labels) & set(policy.excluded_labels):
             if w.active_lease:
-                coordinator.release(s, get(s, Lease, w.active_lease), terminal="cancelled", requeue=False)
+                coordinator.release(
+                    s, get(s, Lease, w.active_lease), terminal="cancelled", requeue=False
+                )
             w.state = "validation_pending"
         elif changed or w.state == "closed":
             w.state = "validation_pending"
-        if w.state == "validation_pending" and p.active and not set(labels) & set(policy.excluded_labels):
+        if (
+            w.state == "validation_pending"
+            and p.active
+            and not set(labels) & set(policy.excluded_labels)
+        ):
             if not policy.require_validation or (trusted_ready and policy.ready_label in labels):
                 w.state = "queued"
         audit(s, p.id, "github", "issue." + action, work_id=w.id)
@@ -798,43 +1144,128 @@ code{{font-family:ui-monospace,Menlo,monospace;background:#f3f6f8;padding:.15rem
         action = payload.get("action", "")
         trusted_ready = False
         with database.read() as s:
-            p = s.scalar(select(Project).where(Project.repository_id == repo.get("id", -1), Project.installation_id == installation))
+            p = s.scalar(
+                select(Project).where(
+                    Project.repository_id == repo.get("id", -1),
+                    Project.installation_id == installation,
+                )
+            )
             if p:
                 pd = project_data(p)
             else:
                 pd = None
         if pd and kind == "issues" and action in {"opened", "labeled", "reopened"} and not cfg.demo:
-            if Policy(**pd["policy"]).ready_label in [x["name"] for x in payload.get("issue", {}).get("labels", [])]:
-                trusted_ready = await asyncio.to_thread(gateway.can_manage, installation, pd["repository_id"], pd["repository"], payload["sender"]["login"])
+            if Policy(**pd["policy"]).ready_label in [
+                x["name"] for x in payload.get("issue", {}).get("labels", [])
+            ]:
+                trusted_ready = await asyncio.to_thread(
+                    gateway.can_manage,  # type: ignore[union-attr]
+                    installation,
+                    pd["repository_id"],
+                    pd["repository"],
+                    payload["sender"]["login"],
+                )
+        # Reviewer permission for PR review iteration is checked the same way as the ready
+        # label above: via can_manage, on the sender who actually triggered the event, never on
+        # a co4 Member row (a reviewer need not ever have logged into Co4). Also never trust an
+        # event authored by our own App bot -- that would be a self-triggered loop.
+        app_bot = (cfg.app_slug + "[bot]") if cfg.app_slug else None
+        revision_permitted = False
+        # Set alongside revision_permitted whenever the event structurally qualifies as a
+        # revision trigger and a real can_manage check ran -- as opposed to revision_permitted
+        # staying False just because cfg.demo skipped the check, or the event/sender didn't
+        # match at all. Lets the handlers below tell "denied" apart from "not applicable" so a
+        # genuine permission denial can be audited instead of silently doing nothing.
+        revision_check_attempted = False
+        if (
+            pd
+            and kind == "pull_request_review"
+            and action == "submitted"
+            and payload.get("review", {}).get("state") in {"changes_requested", "approved"}
+            and payload.get("review", {}).get("user", {}).get("login") != app_bot
+            and not cfg.demo
+        ):
+            revision_check_attempted = True
+            revision_permitted = await asyncio.to_thread(
+                gateway.can_manage,  # type: ignore[union-attr]
+                installation,
+                pd["repository_id"],
+                pd["repository"],
+                payload["review"]["user"]["login"],
+            )
+        elif (
+            pd
+            and kind == "issue_comment"
+            and action == "created"
+            and "pull_request" in payload.get("issue", {})
+            and payload.get("comment", {}).get("body", "").strip().startswith("/co4 revise")
+            and payload.get("sender", {}).get("login") != app_bot
+            and not cfg.demo
+        ):
+            revision_check_attempted = True
+            revision_permitted = await asyncio.to_thread(
+                gateway.can_manage,  # type: ignore[union-attr]
+                installation,
+                pd["repository_id"],
+                pd["repository"],
+                payload["sender"]["login"],
+            )
         with database.transaction() as s:
             if s.get(Delivery, delivery):
                 return {"duplicate": True}
             s.add(Delivery(id=delivery))
             if kind == "installation" and action in {"deleted", "suspend"}:
-                projects = list(s.scalars(select(Project).where(Project.installation_id == installation)))
+                projects = list(
+                    s.scalars(select(Project).where(Project.installation_id == installation))
+                )
             elif kind == "installation_repositories" and action == "removed":
                 ids = [r["id"] for r in payload.get("repositories_removed", [])]
-                projects = list(s.scalars(select(Project).where(Project.repository_id.in_(ids), Project.installation_id == installation)))
+                projects = list(
+                    s.scalars(
+                        select(Project).where(
+                            Project.repository_id.in_(ids), Project.installation_id == installation
+                        )
+                    )
+                )
             else:
                 projects = []
             for project in projects:
                 project.active = False
-                for w in s.scalars(select(Work).where(Work.project_id == project.id, Work.active_lease.is_not(None))):
-                    coordinator.release(s, get(s, Lease, w.active_lease), terminal="cancelled", requeue=False)
+                for w in s.scalars(
+                    select(Work).where(
+                        Work.project_id == project.id, Work.active_lease.is_not(None)
+                    )
+                ):
+                    coordinator.release(
+                        s, get(s, Lease, w.active_lease), terminal="cancelled", requeue=False
+                    )
                 audit(s, project.id, "github", "installation.revoked")
             if not pd:
                 return {"accepted": True, "matched": False}
             p = get(s, Project, pd["id"])
             if kind == "issues" and "pull_request" not in payload.get("issue", {}):
                 issue = payload.get("issue", {})
-                if not isinstance(issue.get("number"), int) or not isinstance(issue.get("title"), str):
+                if not isinstance(issue.get("number"), int) or not isinstance(
+                    issue.get("title"), str
+                ):
                     fail(400, "Issue payload is incomplete")
                 ingest_issue(s, p, issue, trusted_ready, action)
-            elif kind == "issue_comment" and action == "created":
+            elif (
+                kind == "issue_comment"
+                and action == "created"
+                and "pull_request" not in payload.get("issue", {})
+            ):
                 text = payload.get("comment", {}).get("body", "").strip()
                 if text.startswith("/co4 "):
-                    identity = s.scalar(select(User).where(User.github_id == payload.get("sender", {}).get("id")))
-                    w = s.scalar(select(Work).where(Work.project_id == p.id, Work.number == payload.get("issue", {}).get("number")))
+                    identity = s.scalar(
+                        select(User).where(User.github_id == payload.get("sender", {}).get("id"))
+                    )
+                    w = s.scalar(
+                        select(Work).where(
+                            Work.project_id == p.id,
+                            Work.number == payload.get("issue", {}).get("number"),
+                        )
+                    )
                     if identity and w:
                         parts = text.split()
                         try:
@@ -843,29 +1274,222 @@ code{{font-family:ui-monospace,Menlo,monospace;background:#f3f6f8;padding:.15rem
                                 if w.state == "validation_pending" and p.active:
                                     w.state = "queued"
                                     audit(s, p.id, identity.id, "work.validated", work_id=w.id)
-                                    status(s, w, "Request validated from GitHub. It is eligible for matching.")
+                                    status(
+                                        s,
+                                        w,
+                                        "Request validated from GitHub. It is eligible for "
+                                        "matching.",
+                                    )
                             elif w.active_lease and parts[1] == "recover":
                                 coordinator.recover(s, get(s, Lease, w.active_lease), identity.id)
                             elif w.active_lease and len(parts) == 4 and parts[1] == "approve":
-                                coordinator.approve(s, get(s, Lease, w.active_lease), identity.id,
-                                    Approval(sha=parts[2], review_digest=parts[3], confirm_reviewed=True))
+                                coordinator.approve(
+                                    s,
+                                    get(s, Lease, w.active_lease),
+                                    identity.id,
+                                    Approval(
+                                        sha=parts[2], review_digest=parts[3], confirm_reviewed=True
+                                    ),
+                                )
                         except (HTTPException, ValueError):
                             audit(s, p.id, identity.id, "github_command.denied", work_id=w.id)
+            elif (
+                kind == "issue_comment"
+                and action == "created"
+                and "pull_request" in payload.get("issue", {})
+            ):
+                text = payload.get("comment", {}).get("body", "").strip()
+                if text.startswith("/co4 revise"):
+                    submission = s.scalar(
+                        select(Submission).where(
+                            Submission.project_id == p.id,
+                            Submission.pr_number == payload.get("issue", {}).get("number", -1),
+                        )
+                    )
+                    if submission:
+                        w = get(s, Work, submission.work_id)
+                        if revision_permitted:
+                            outcome = iteration.request_revision(
+                                s,
+                                coordinator,
+                                p,
+                                w,
+                                submission,
+                                review_id=f"comment:{payload.get('comment', {}).get('id')}",
+                                trigger="revise_comment",
+                                feedback_text=text,
+                                reviewer_login=payload.get("sender", {}).get("login", ""),
+                                # issue_comment payloads carry no PR head SHA; outdated-head
+                                # filtering only applies to pull_request_review, which does.
+                                head_sha=None,
+                            )
+                            # "escalated" already gets its own detailed audit entry from
+                            # iteration.escalate(); every other non-"requested" outcome is
+                            # otherwise a silent no-op, so record why this comment produced no
+                            # visible action.
+                            if outcome not in {"requested", "escalated"}:
+                                audit(
+                                    s,
+                                    p.id,
+                                    "github",
+                                    "revision.request_ignored",
+                                    work_id=w.id,
+                                    trigger="revise_comment",
+                                    outcome=outcome,
+                                )
+                        elif revision_check_attempted:
+                            # Sender lacks can_manage: same denial shape as the /co4
+                            # validate|approve|recover path above.
+                            audit(
+                                s,
+                                p.id,
+                                "github",
+                                "github_command.denied",
+                                work_id=w.id,
+                                trigger="revise_comment",
+                            )
+            elif kind == "pull_request_review" and action == "submitted":
+                review = payload.get("review", {})
+                if review.get("state") == "approved":
+                    submission = s.scalar(
+                        select(Submission).where(
+                            Submission.project_id == p.id,
+                            Submission.pr_number
+                            == payload.get("pull_request", {}).get("number", -1),
+                        )
+                    )
+                    if submission:
+                        if revision_permitted:
+                            iteration.review_approved(
+                                s,
+                                get(s, Work, submission.work_id),
+                                submission,
+                                head_sha=review.get("commit_id"),
+                            )
+                        elif revision_check_attempted:
+                            audit(
+                                s,
+                                p.id,
+                                "github",
+                                "github_command.denied",
+                                work_id=submission.work_id,
+                                trigger="approved",
+                            )
+                elif review.get("state") == "changes_requested":
+                    pr = payload.get("pull_request", {})
+                    submission = s.scalar(
+                        select(Submission).where(
+                            Submission.project_id == p.id,
+                            Submission.pr_number == pr.get("number", -1),
+                        )
+                    )
+                    if submission:
+                        w = get(s, Work, submission.work_id)
+                        if revision_permitted:
+                            outcome = iteration.request_revision(
+                                s,
+                                coordinator,
+                                p,
+                                w,
+                                submission,
+                                review_id=f"review:{review.get('id')}",
+                                trigger="changes_requested",
+                                feedback_text=review.get("body") or "",
+                                reviewer_login=review.get("user", {}).get("login", ""),
+                                head_sha=review.get("commit_id"),
+                            )
+                            # See the /co4 revise comment handler above: "escalated" audits
+                            # itself, every other non-"requested" outcome would otherwise be a
+                            # silent no-op.
+                            if outcome not in {"requested", "escalated"}:
+                                audit(
+                                    s,
+                                    p.id,
+                                    "github",
+                                    "revision.request_ignored",
+                                    work_id=w.id,
+                                    trigger="changes_requested",
+                                    outcome=outcome,
+                                )
+                        elif revision_check_attempted:
+                            audit(
+                                s,
+                                p.id,
+                                "github",
+                                "github_command.denied",
+                                work_id=w.id,
+                                trigger="changes_requested",
+                            )
             elif kind == "pull_request":
                 pr = payload.get("pull_request", {})
-                branch = pr.get("head", {}).get("ref", "")
-                for l in s.scalars(select(Lease).join(Work, Lease.work_id == Work.id).where(Work.project_id == p.id)):
-                    if branch == f"co4/submission/{l.id}/{l.approved_sha[:12]}":
-                        w = get(s, Work, l.work_id)
-                        if action == "synchronize" and pr.get("head", {}).get("sha") != l.approved_sha:
-                            l.error = "PR head changed after approval. Fresh review is required."
-                            l.state, w.state = "review_invalidated", "review_invalidated"
-                            audit(s, p.id, "github", "review.invalidated", lease_id=l.id)
-                            status(s, w, "The PR head changed after approval. The previous execution receipt no longer attests to the PR head; a fresh review is required.")
-                        elif action == "closed":
-                            l.state = "merged" if pr.get("merged") else "closed"
-                            w.state = l.state
-                            audit(s, p.id, "github", "pull_request." + l.state, lease_id=l.id)
+                submission = s.scalar(
+                    select(Submission).where(
+                        Submission.project_id == p.id,
+                        Submission.pr_number == pr.get("number", -1),
+                    )
+                )
+                if submission:
+                    w = get(s, Work, submission.work_id)
+                    active = get(s, Lease, w.active_lease) if w.active_lease else None
+                    head_sha = pr.get("head", {}).get("sha", "")
+                    # The App's own fast-forward can be delivered before the outbox transaction
+                    # that records the new expected head commits: accept the exact commit the
+                    # in-flight, human-approved revision lease is publishing, too.
+                    in_flight = bool(
+                        active
+                        and active.kind == "revision"
+                        and active.state == "publishing"
+                        and head_sha
+                        and head_sha == active.approved_sha
+                    )
+                    if action == "synchronize":
+                        if head_sha and (head_sha == submission.expected_head_sha or in_flight):
+                            # Expected fast-forward: our own initial publish or an
+                            # App-fast-forwarded, human-approved revision. Nothing to invalidate.
+                            submission.updated = time.time()
+                        else:
+                            iteration.escalate(
+                                s,
+                                p,
+                                w,
+                                submission,
+                                reason="The PR head moved to a commit Co4 did not publish, so "
+                                "the execution receipt no longer attests to it",
+                            )
+                            if active:
+                                active.error = (
+                                    "PR head changed after approval. Fresh review is required."
+                                )
+                                active.state = w.state = "review_invalidated"
+                            audit(
+                                s,
+                                p.id,
+                                "github",
+                                "review.invalidated",
+                                work_id=w.id,
+                                pr_number=submission.pr_number,
+                            )
+                            status(
+                                s,
+                                w,
+                                "The PR head changed unexpectedly. The previous execution "
+                                "receipt no longer attests to the PR head; a fresh review is "
+                                "required.",
+                            )
+                    elif action == "closed":
+                        submission.state = "merged" if pr.get("merged") else "closed"
+                        submission.updated = time.time()
+                        w.state = submission.state
+                        if active:
+                            active.state = submission.state
+                        audit(
+                            s,
+                            p.id,
+                            "github",
+                            "pull_request." + submission.state,
+                            work_id=w.id,
+                            pr_number=submission.pr_number,
+                        )
             return {"accepted": True}
 
     static = Path(__file__).parent / "static"
