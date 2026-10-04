@@ -11,7 +11,7 @@ requires-python = ">=3.11"
 license = "MIT"
 authors = [{name = "Co4 contributors"}]
 dependencies = [
-  "fastapi==0.141.1", "uvicorn==0.54.0", "SQLAlchemy==2.1.1",
+  "fastapi==0.142.2", "uvicorn==0.54.0", "SQLAlchemy==2.1.1",
   "httpx==0.28.1", "PyJWT==2.15.0", "cryptography==50.0.1", "pydantic==2.13.5"
 ]
 [project.optional-dependencies]
