@@ -17,7 +17,7 @@ dependencies = [
 [project.optional-dependencies]
 postgres = ["psycopg[binary]>=3.2,<4"]
 test = ["pytest==9.1.1", "pytest-bdd>=8.1,<10", "playwright>=1.50,<2", "pytest-cov>=7.0,<8"]
-lint = ["ruff==0.17.2", "mypy==2.4.0"]
+lint = ["ruff==0.17.3", "mypy==2.4.1"]
 [project.scripts]
 co4 = "co4.cli:main"
 [tool.setuptools.packages.find]
